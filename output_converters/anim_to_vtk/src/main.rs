@@ -28,60 +28,58 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::process;
 
 const FASTMAGI10: i32 = 0x542c;
 
 // ****************************************
-// read big-endian data from file
+// read big-endian data from a buffered reader
 // ****************************************
-fn read_i32(file: &mut File) -> i32 {
+fn read_i32(reader: &mut impl Read) -> i32 {
     let mut buf = [0u8; 4];
-    file.read_exact(&mut buf).expect("Error in reading file");
+    reader.read_exact(&mut buf).expect("Error in reading file");
     i32::from_be_bytes(buf)
 }
 
-fn read_f32(file: &mut File) -> f32 {
+fn read_f32(reader: &mut impl Read) -> f32 {
     let mut buf = [0u8; 4];
-    file.read_exact(&mut buf).expect("Error in reading file");
+    reader.read_exact(&mut buf).expect("Error in reading file");
     f32::from_be_bytes(buf)
 }
 
-fn read_i32_vec(file: &mut File, count: usize) -> Vec<i32> {
-    let mut result = Vec::with_capacity(count);
-    for _ in 0..count {
-        result.push(read_i32(file));
-    }
-    result
+fn read_i32_vec(reader: &mut impl Read, count: usize) -> Vec<i32> {
+    let mut buf = vec![0u8; count * 4];
+    reader.read_exact(&mut buf).expect("Error in reading file");
+    buf.chunks_exact(4)
+        .map(|c| i32::from_be_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
-fn read_f32_vec(file: &mut File, count: usize) -> Vec<f32> {
-    let mut result = Vec::with_capacity(count);
-    for _ in 0..count {
-        result.push(read_f32(file));
-    }
-    result
+fn read_f32_vec(reader: &mut impl Read, count: usize) -> Vec<f32> {
+    let mut buf = vec![0u8; count * 4];
+    reader.read_exact(&mut buf).expect("Error in reading file");
+    buf.chunks_exact(4)
+        .map(|c| f32::from_be_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
-fn read_u16_vec(file: &mut File, count: usize) -> Vec<u16> {
-    let mut result = Vec::with_capacity(count);
-    let mut buf = [0u8; 2];
-    for _ in 0..count {
-        file.read_exact(&mut buf).expect("Error in reading file");
-        result.push(u16::from_be_bytes(buf));
-    }
-    result
+fn read_u16_vec(reader: &mut impl Read, count: usize) -> Vec<u16> {
+    let mut buf = vec![0u8; count * 2];
+    reader.read_exact(&mut buf).expect("Error in reading file");
+    buf.chunks_exact(2)
+        .map(|c| u16::from_be_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
-fn read_bytes(file: &mut File, count: usize) -> Vec<u8> {
+fn read_bytes(reader: &mut impl Read, count: usize) -> Vec<u8> {
     let mut buf = vec![0u8; count];
-    file.read_exact(&mut buf).expect("Error in reading file");
+    reader.read_exact(&mut buf).expect("Error in reading file");
     buf
 }
 
-fn read_text(file: &mut File, count: usize) -> String {
-    let buf = read_bytes(file, count);
+fn read_text(reader: &mut impl Read, count: usize) -> String {
+    let buf = read_bytes(reader, count);
     let s = std::str::from_utf8(&buf).unwrap_or("");
     s.trim_end_matches('\0').to_string()
 }
@@ -94,13 +92,37 @@ fn replace_underscore(s: &str) -> String {
 }
 
 // ****************************************
+// VTK output helpers
+// ****************************************
+fn write_zero_scalar_rows(out: &mut impl Write, count: usize) {
+    for _ in 0..count {
+        writeln!(out, "0").unwrap();
+    }
+}
+
+fn write_zero_tensor_rows(out: &mut impl Write, count: usize) {
+    for _ in 0..count {
+        writeln!(out, "0 0 0 ").unwrap();
+        writeln!(out, "0 0 0 ").unwrap();
+        writeln!(out, "0 0 0 ").unwrap();
+    }
+}
+
+fn write_symmetric_tensor(out: &mut impl Write, vals: &[f32], base: usize) {
+    writeln!(out, "{} {} {}", vals[base], vals[base + 3], vals[base + 4]).unwrap();
+    writeln!(out, "{} {} {}", vals[base + 3], vals[base + 1], vals[base + 5]).unwrap();
+    writeln!(out, "{} {} {}", vals[base + 4], vals[base + 5], vals[base + 2]).unwrap();
+}
+
+// ****************************************
 // convert an A-File to ascii vtk format
 // ****************************************
 fn read_radioss_anim(file_name: &str) {
-    let mut inf = File::open(file_name).unwrap_or_else(|_| {
+    let file = File::open(file_name).unwrap_or_else(|_| {
         eprintln!("Can't open input file {}", file_name);
         process::exit(1);
     });
+    let mut inf = BufReader::new(file);
 
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
@@ -470,37 +492,33 @@ fn read_radioss_anim(file_name: &str) {
             }
             writeln!(out).unwrap();
 
-            // detect tetrahedra in 3D cells
-            let mut is_3d_cell_tetrahedron: Vec<bool> = Vec::new();
+            // detect tetrahedra in 3D cells and cache unique node sets
             let mut tetrahedron_count: usize = 0;
-            for icon in 0..nb_elts_3d {
-                let mut nodes = BTreeSet::new();
-                for i in 0..8 {
-                    nodes.insert(connect_3d[icon * 8 + i]);
-                }
-                if nodes.len() == 4 {
-                    is_3d_cell_tetrahedron.push(true);
-                    tetrahedron_count += 1;
-                } else {
-                    is_3d_cell_tetrahedron.push(false);
-                }
-            }
+            let tet_unique_nodes: Vec<Option<Vec<i32>>> = (0..nb_elts_3d)
+                .map(|icon| {
+                    let mut nodes = BTreeSet::new();
+                    for i in 0..8 {
+                        nodes.insert(connect_3d[icon * 8 + i]);
+                    }
+                    if nodes.len() == 4 {
+                        tetrahedron_count += 1;
+                        Some(nodes.into_iter().collect())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             // detect triangles in 2D cells
-            let mut is_2d_triangle: Vec<bool> = Vec::new();
-            let mut _triangle_count: usize = 0;
-            for icon in 0..nb_facets {
-                let mut nodes = BTreeSet::new();
-                for i in 0..4 {
-                    nodes.insert(connect_a[icon * 4 + i]);
-                }
-                if nodes.len() == 3 {
-                    is_2d_triangle.push(true);
-                    _triangle_count += 1;
-                } else {
-                    is_2d_triangle.push(false);
-                }
-            }
+            let is_2d_triangle: Vec<bool> = (0..nb_facets)
+                .map(|icon| {
+                    let mut nodes = BTreeSet::new();
+                    for i in 0..4 {
+                        nodes.insert(connect_a[icon * 4 + i]);
+                    }
+                    nodes.len() == 3
+                })
+                .collect();
 
             let total_cells = nb_elts_1d + nb_facets + nb_elts_3d + nb_elts_sph;
             if total_cells > 0 {
@@ -534,14 +552,10 @@ fn read_radioss_anim(file_name: &str) {
                     .unwrap();
                 }
                 // 3D elements
-                for icon in 0..nb_elts_3d {
-                    if is_3d_cell_tetrahedron[icon] {
-                        let mut nodes = BTreeSet::new();
-                        for i in 0..8 {
-                            nodes.insert(connect_3d[icon * 8 + i]);
-                        }
+                for (icon, tet_nodes) in tet_unique_nodes.iter().enumerate() {
+                    if let Some(nodes) = tet_nodes {
                         write!(out, "4").unwrap();
-                        for n in &nodes {
+                        for n in nodes {
                             write!(out, " {}", n).unwrap();
                         }
                         writeln!(out).unwrap();
@@ -562,8 +576,8 @@ fn read_radioss_anim(file_name: &str) {
                     }
                 }
                 // SPH elements
-                for icon in 0..nb_elts_sph {
-                    writeln!(out, "1 {}", connec_sph[icon]).unwrap();
+                for sph_node in connec_sph.iter().take(nb_elts_sph) {
+                    writeln!(out, "1 {}", sph_node).unwrap();
                 }
             }
             writeln!(out).unwrap();
@@ -574,15 +588,15 @@ fn read_radioss_anim(file_name: &str) {
                 for _ in 0..nb_elts_1d {
                     writeln!(out, "3").unwrap();
                 }
-                for icon in 0..nb_facets {
-                    if is_2d_triangle[icon] {
+                for &is_tri in &is_2d_triangle {
+                    if is_tri {
                         writeln!(out, "5").unwrap();
                     } else {
                         writeln!(out, "9").unwrap();
                     }
                 }
-                for icon in 0..nb_elts_3d {
-                    if is_3d_cell_tetrahedron[icon] {
+                for tet_nodes in &tet_unique_nodes {
+                    if tet_nodes.is_some() {
                         writeln!(out, "10").unwrap();
                     } else {
                         writeln!(out, "12").unwrap();
@@ -600,8 +614,8 @@ fn read_radioss_anim(file_name: &str) {
             // node id
             writeln!(out, "SCALARS NODE_ID int 1").unwrap();
             writeln!(out, "LOOKUP_TABLE default").unwrap();
-            for inod in 0..nb_nodes {
-                writeln!(out, "{}", nod_num_a[inod]).unwrap();
+            for id in &nod_num_a {
+                writeln!(out, "{}", id).unwrap();
             }
             writeln!(out).unwrap();
 
@@ -636,17 +650,17 @@ fn read_radioss_anim(file_name: &str) {
             // element id
             writeln!(out, "SCALARS ELEMENT_ID int 1").unwrap();
             writeln!(out, "LOOKUP_TABLE default").unwrap();
-            for iel in 0..nb_elts_1d {
-                writeln!(out, "{}", el_num_1d[iel]).unwrap();
+            for id in &el_num_1d {
+                writeln!(out, "{}", id).unwrap();
             }
-            for iel in 0..nb_facets {
-                writeln!(out, "{}", el_num_a[iel]).unwrap();
+            for id in &el_num_a {
+                writeln!(out, "{}", id).unwrap();
             }
-            for iel in 0..nb_elts_3d {
-                writeln!(out, "{}", el_num_3d[iel]).unwrap();
+            for id in &el_num_3d {
+                writeln!(out, "{}", id).unwrap();
             }
-            for iel in 0..nb_elts_sph {
-                writeln!(out, "{}", nod_num_sph[iel]).unwrap();
+            for id in &nod_num_sph {
+                writeln!(out, "{}", id).unwrap();
             }
             writeln!(out).unwrap();
 
@@ -720,17 +734,17 @@ fn read_radioss_anim(file_name: &str) {
             // element erosion status (0:off, 1:on)
             writeln!(out, "SCALARS EROSION_STATUS int 1").unwrap();
             writeln!(out, "LOOKUP_TABLE default").unwrap();
-            for iel in 0..nb_elts_1d {
-                writeln!(out, "{}", if del_elt_1d[iel] != 0 { 1 } else { 0 }).unwrap();
+            for &d in &del_elt_1d {
+                writeln!(out, "{}", if d != 0 { 1 } else { 0 }).unwrap();
             }
-            for iel in 0..nb_facets {
-                writeln!(out, "{}", if del_elt_a[iel] != 0 { 1 } else { 0 }).unwrap();
+            for &d in &del_elt_a {
+                writeln!(out, "{}", if d != 0 { 1 } else { 0 }).unwrap();
             }
-            for iel in 0..nb_elts_3d {
-                writeln!(out, "{}", if del_elt_3d[iel] != 0 { 1 } else { 0 }).unwrap();
+            for &d in &del_elt_3d {
+                writeln!(out, "{}", if d != 0 { 1 } else { 0 }).unwrap();
             }
-            for iel in 0..nb_elts_sph {
-                writeln!(out, "{}", if del_elt_sph[iel] != 0 { 1 } else { 0 }).unwrap();
+            for &d in &del_elt_sph {
+                writeln!(out, "{}", if d != 0 { 1 } else { 0 }).unwrap();
             }
             writeln!(out).unwrap();
 
@@ -742,15 +756,7 @@ fn read_radioss_anim(file_name: &str) {
                 for iel in 0..nb_elts_1d {
                     writeln!(out, "{}", efunc_1d[iefun * nb_elts_1d + iel]).unwrap();
                 }
-                for _ in 0..nb_facets {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_elts_3d {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0").unwrap();
-                }
+                write_zero_scalar_rows(&mut out, nb_facets + nb_elts_3d + nb_elts_sph);
                 writeln!(out).unwrap();
             }
 
@@ -774,15 +780,7 @@ fn read_radioss_anim(file_name: &str) {
                         )
                         .unwrap();
                     }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "0").unwrap();
-                    }
+                    write_zero_scalar_rows(&mut out, nb_facets + nb_elts_3d + nb_elts_sph);
                     writeln!(out).unwrap();
                 }
             }
@@ -792,30 +790,19 @@ fn read_radioss_anim(file_name: &str) {
                 let name = replace_underscore(&f_text_a[iefun + nb_func]);
                 writeln!(out, "SCALARS 2DELEM_{} float 1", name).unwrap();
                 writeln!(out, "LOOKUP_TABLE default").unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0").unwrap();
-                }
+                write_zero_scalar_rows(&mut out, nb_elts_1d);
                 for iel in 0..nb_facets {
                     writeln!(out, "{}", efunc_a[iefun * nb_facets + iel]).unwrap();
                 }
-                for _ in 0..nb_elts_3d {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0").unwrap();
-                }
+                write_zero_scalar_rows(&mut out, nb_elts_3d + nb_elts_sph);
                 writeln!(out).unwrap();
             }
 
             // 2D tensors
-            for ietens in 0..nb_tens {
-                let name = replace_underscore(&t_text_a[ietens]);
+            for (ietens, t_name) in t_text_a.iter().enumerate().take(nb_tens) {
+                let name = replace_underscore(t_name);
                 writeln!(out, "TENSORS 2DELEM_{} float", name).unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
+                write_zero_tensor_rows(&mut out, nb_elts_1d);
                 for iel in 0..nb_facets {
                     let base = iel * 3 + ietens * 3 * nb_facets;
                     writeln!(
@@ -832,16 +819,7 @@ fn read_radioss_anim(file_name: &str) {
                     .unwrap();
                     writeln!(out, "0 0 0 ").unwrap();
                 }
-                for _ in 0..nb_elts_3d {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
+                write_zero_tensor_rows(&mut out, nb_elts_3d + nb_elts_sph);
                 writeln!(out).unwrap();
             }
 
@@ -850,67 +828,24 @@ fn read_radioss_anim(file_name: &str) {
                 let name = replace_underscore(&f_text_3d[iefun]);
                 writeln!(out, "SCALARS 3DELEM_{} float 1", name).unwrap();
                 writeln!(out, "LOOKUP_TABLE default").unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_facets {
-                    writeln!(out, "0").unwrap();
-                }
+                write_zero_scalar_rows(&mut out, nb_elts_1d + nb_facets);
                 for iel in 0..nb_elts_3d {
                     writeln!(out, "{}", efunc_3d[iefun * nb_elts_3d + iel]).unwrap();
                 }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0").unwrap();
-                }
+                write_zero_scalar_rows(&mut out, nb_elts_sph);
                 writeln!(out).unwrap();
             }
 
             // 3D tensors
-            for ietens in 0..nb_tens_3d {
-                let name = replace_underscore(&t_text_3d[ietens]);
+            for (ietens, t_name) in t_text_3d.iter().enumerate().take(nb_tens_3d) {
+                let name = replace_underscore(t_name);
                 writeln!(out, "TENSORS 3DELEM_{} float", name).unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
-                for _ in 0..nb_facets {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
+                write_zero_tensor_rows(&mut out, nb_elts_1d + nb_facets);
                 for iel in 0..nb_elts_3d {
                     let base = iel * 6 + ietens * 6 * nb_elts_3d;
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        tens_val_3d[base],
-                        tens_val_3d[base + 3],
-                        tens_val_3d[base + 4]
-                    )
-                    .unwrap();
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        tens_val_3d[base + 3],
-                        tens_val_3d[base + 1],
-                        tens_val_3d[base + 5]
-                    )
-                    .unwrap();
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        tens_val_3d[base + 4],
-                        tens_val_3d[base + 5],
-                        tens_val_3d[base + 2]
-                    )
-                    .unwrap();
+                    write_symmetric_tensor(&mut out, &tens_val_3d, base);
                 }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
+                write_zero_tensor_rows(&mut out, nb_elts_sph);
                 writeln!(out).unwrap();
             }
 
@@ -920,65 +855,20 @@ fn read_radioss_anim(file_name: &str) {
                     let name = replace_underscore(&scal_text_sph[iefun]);
                     writeln!(out, "SCALARS SPHELEM_{} float 1", name).unwrap();
                     writeln!(out, "LOOKUP_TABLE default").unwrap();
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0").unwrap();
-                    }
+                    write_zero_scalar_rows(&mut out, nb_elts_1d + nb_facets + nb_elts_3d);
                     for iel in 0..nb_elts_sph {
                         writeln!(out, "{}", efunc_sph[iefun * nb_elts_sph + iel]).unwrap();
                     }
                     writeln!(out).unwrap();
                 }
 
-                for ietens in 0..nb_tens_sph {
-                    let name = replace_underscore(&tens_text_sph[ietens]);
+                for (ietens, t_name) in tens_text_sph.iter().enumerate().take(nb_tens_sph) {
+                    let name = replace_underscore(t_name);
                     writeln!(out, "TENSORS SPHELEM_{} float", name).unwrap();
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
+                    write_zero_tensor_rows(&mut out, nb_elts_1d + nb_facets + nb_elts_3d);
                     for iel in 0..nb_elts_sph {
                         let base = iel * 6 + ietens * 6 * nb_elts_sph;
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            tens_val_sph[base],
-                            tens_val_sph[base + 3],
-                            tens_val_sph[base + 4]
-                        )
-                        .unwrap();
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            tens_val_sph[base + 3],
-                            tens_val_sph[base + 1],
-                            tens_val_sph[base + 5]
-                        )
-                        .unwrap();
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            tens_val_sph[base + 4],
-                            tens_val_sph[base + 5],
-                            tens_val_sph[base + 2]
-                        )
-                        .unwrap();
+                        write_symmetric_tensor(&mut out, &tens_val_sph, base);
                     }
                     writeln!(out).unwrap();
                 }
