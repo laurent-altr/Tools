@@ -94,9 +94,24 @@ fn replace_underscore(s: &str) -> String {
 }
 
 // ****************************************
-// convert an A-File to ascii vtk format
+// write binary data to stdout
 // ****************************************
-fn read_radioss_anim(file_name: &str) {
+fn write_i32_binary(out: &mut BufWriter<io::StdoutLock>, val: i32) {
+    out.write_all(&val.to_be_bytes()).unwrap();
+}
+
+fn write_f32_binary(out: &mut BufWriter<io::StdoutLock>, val: f32) {
+    out.write_all(&val.to_be_bytes()).unwrap();
+}
+
+fn write_f64_binary(out: &mut BufWriter<io::StdoutLock>, val: f64) {
+    out.write_all(&val.to_be_bytes()).unwrap();
+}
+
+// ****************************************
+// convert an A-File to vtk format (ASCII or BINARY)
+// ****************************************
+fn read_radioss_anim(file_name: &str, binary_format: bool) {
     let mut inf = File::open(file_name).unwrap_or_else(|_| {
         eprintln!("Can't open input file {}", file_name);
         process::exit(1);
@@ -443,30 +458,52 @@ fn read_radioss_anim(file_name: &str) {
             }
 
             // ********************
-            // VTK ASCII output
+            // VTK output
             // ********************
             writeln!(out, "# vtk DataFile Version 3.0").unwrap();
             writeln!(out, "vtk output").unwrap();
-            writeln!(out, "ASCII").unwrap();
+            if binary_format {
+                writeln!(out, "BINARY").unwrap();
+            } else {
+                writeln!(out, "ASCII").unwrap();
+            }
             writeln!(out, "DATASET UNSTRUCTURED_GRID").unwrap();
 
             writeln!(out, "FIELD FieldData 2").unwrap();
             writeln!(out, "TIME 1 1 double").unwrap();
-            writeln!(out, "{}", a_time).unwrap();
+            if binary_format {
+                write_f64_binary(&mut out, a_time as f64);
+                writeln!(out).unwrap();
+            } else {
+                writeln!(out, "{}", a_time).unwrap();
+            }
             writeln!(out, "CYCLE 1 1 int").unwrap();
-            writeln!(out, "0").unwrap();
+            if binary_format {
+                write_i32_binary(&mut out, 0);
+                writeln!(out).unwrap();
+            } else {
+                writeln!(out, "0").unwrap();
+            }
 
             // nodes
             writeln!(out, "POINTS {} float", nb_nodes).unwrap();
-            for inod in 0..nb_nodes {
-                writeln!(
-                    out,
-                    "{} {} {}",
-                    coor_a[3 * inod],
-                    coor_a[3 * inod + 1],
-                    coor_a[3 * inod + 2]
-                )
-                .unwrap();
+            if binary_format {
+                for inod in 0..nb_nodes {
+                    write_f32_binary(&mut out, coor_a[3 * inod]);
+                    write_f32_binary(&mut out, coor_a[3 * inod + 1]);
+                    write_f32_binary(&mut out, coor_a[3 * inod + 2]);
+                }
+            } else {
+                for inod in 0..nb_nodes {
+                    writeln!(
+                        out,
+                        "{} {} {}",
+                        coor_a[3 * inod],
+                        coor_a[3 * inod + 1],
+                        coor_a[3 * inod + 2]
+                    )
+                    .unwrap();
+                }
             }
             writeln!(out).unwrap();
 
@@ -511,59 +548,99 @@ fn read_radioss_anim(file_name: &str) {
                     + nb_elts_sph * 2;
                 writeln!(out, "CELLS {} {}", total_cells, cells_size).unwrap();
 
-                // 1D elements
-                for icon in 0..nb_elts_1d {
-                    writeln!(
-                        out,
-                        "2 {} {}",
-                        connect_1d[icon * 2],
-                        connect_1d[icon * 2 + 1]
-                    )
-                    .unwrap();
-                }
-                // 2D elements
-                for icon in 0..nb_facets {
-                    writeln!(
-                        out,
-                        "4 {} {} {} {}",
-                        connect_a[icon * 4],
-                        connect_a[icon * 4 + 1],
-                        connect_a[icon * 4 + 2],
-                        connect_a[icon * 4 + 3]
-                    )
-                    .unwrap();
-                }
-                // 3D elements
-                for icon in 0..nb_elts_3d {
-                    if is_3d_cell_tetrahedron[icon] {
-                        let mut nodes = BTreeSet::new();
-                        for i in 0..8 {
-                            nodes.insert(connect_3d[icon * 8 + i]);
+                if binary_format {
+                    // 1D elements
+                    for icon in 0..nb_elts_1d {
+                        write_i32_binary(&mut out, 2);
+                        write_i32_binary(&mut out, connect_1d[icon * 2]);
+                        write_i32_binary(&mut out, connect_1d[icon * 2 + 1]);
+                    }
+                    // 2D elements
+                    for icon in 0..nb_facets {
+                        write_i32_binary(&mut out, 4);
+                        write_i32_binary(&mut out, connect_a[icon * 4]);
+                        write_i32_binary(&mut out, connect_a[icon * 4 + 1]);
+                        write_i32_binary(&mut out, connect_a[icon * 4 + 2]);
+                        write_i32_binary(&mut out, connect_a[icon * 4 + 3]);
+                    }
+                    // 3D elements
+                    for icon in 0..nb_elts_3d {
+                        if is_3d_cell_tetrahedron[icon] {
+                            let mut nodes = BTreeSet::new();
+                            for i in 0..8 {
+                                nodes.insert(connect_3d[icon * 8 + i]);
+                            }
+                            write_i32_binary(&mut out, 4);
+                            for n in &nodes {
+                                write_i32_binary(&mut out, *n);
+                            }
+                        } else {
+                            write_i32_binary(&mut out, 8);
+                            for i in 0..8 {
+                                write_i32_binary(&mut out, connect_3d[icon * 8 + i]);
+                            }
                         }
-                        write!(out, "4").unwrap();
-                        for n in &nodes {
-                            write!(out, " {}", n).unwrap();
-                        }
-                        writeln!(out).unwrap();
-                    } else {
+                    }
+                    // SPH elements
+                    for icon in 0..nb_elts_sph {
+                        write_i32_binary(&mut out, 1);
+                        write_i32_binary(&mut out, connec_sph[icon]);
+                    }
+                } else {
+                    // 1D elements
+                    for icon in 0..nb_elts_1d {
                         writeln!(
                             out,
-                            "8 {}  {}  {}  {}  {}  {}  {}  {}",
-                            connect_3d[icon * 8],
-                            connect_3d[icon * 8 + 1],
-                            connect_3d[icon * 8 + 2],
-                            connect_3d[icon * 8 + 3],
-                            connect_3d[icon * 8 + 4],
-                            connect_3d[icon * 8 + 5],
-                            connect_3d[icon * 8 + 6],
-                            connect_3d[icon * 8 + 7]
+                            "2 {} {}",
+                            connect_1d[icon * 2],
+                            connect_1d[icon * 2 + 1]
                         )
                         .unwrap();
                     }
-                }
-                // SPH elements
-                for icon in 0..nb_elts_sph {
-                    writeln!(out, "1 {}", connec_sph[icon]).unwrap();
+                    // 2D elements
+                    for icon in 0..nb_facets {
+                        writeln!(
+                            out,
+                            "4 {} {} {} {}",
+                            connect_a[icon * 4],
+                            connect_a[icon * 4 + 1],
+                            connect_a[icon * 4 + 2],
+                            connect_a[icon * 4 + 3]
+                        )
+                        .unwrap();
+                    }
+                    // 3D elements
+                    for icon in 0..nb_elts_3d {
+                        if is_3d_cell_tetrahedron[icon] {
+                            let mut nodes = BTreeSet::new();
+                            for i in 0..8 {
+                                nodes.insert(connect_3d[icon * 8 + i]);
+                            }
+                            write!(out, "4").unwrap();
+                            for n in &nodes {
+                                write!(out, " {}", n).unwrap();
+                            }
+                            writeln!(out).unwrap();
+                        } else {
+                            writeln!(
+                                out,
+                                "8 {}  {}  {}  {}  {}  {}  {}  {}",
+                                connect_3d[icon * 8],
+                                connect_3d[icon * 8 + 1],
+                                connect_3d[icon * 8 + 2],
+                                connect_3d[icon * 8 + 3],
+                                connect_3d[icon * 8 + 4],
+                                connect_3d[icon * 8 + 5],
+                                connect_3d[icon * 8 + 6],
+                                connect_3d[icon * 8 + 7]
+                            )
+                            .unwrap();
+                        }
+                    }
+                    // SPH elements
+                    for icon in 0..nb_elts_sph {
+                        writeln!(out, "1 {}", connec_sph[icon]).unwrap();
+                    }
                 }
             }
             writeln!(out).unwrap();
@@ -571,25 +648,48 @@ fn read_radioss_anim(file_name: &str) {
             // element types
             if total_cells > 0 {
                 writeln!(out, "CELL_TYPES {}", total_cells).unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "3").unwrap();
-                }
-                for icon in 0..nb_facets {
-                    if is_2d_triangle[icon] {
-                        writeln!(out, "5").unwrap();
-                    } else {
-                        writeln!(out, "9").unwrap();
+                if binary_format {
+                    for _ in 0..nb_elts_1d {
+                        write_i32_binary(&mut out, 3);
                     }
-                }
-                for icon in 0..nb_elts_3d {
-                    if is_3d_cell_tetrahedron[icon] {
-                        writeln!(out, "10").unwrap();
-                    } else {
-                        writeln!(out, "12").unwrap();
+                    for icon in 0..nb_facets {
+                        if is_2d_triangle[icon] {
+                            write_i32_binary(&mut out, 5);
+                        } else {
+                            write_i32_binary(&mut out, 9);
+                        }
                     }
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "1").unwrap();
+                    for icon in 0..nb_elts_3d {
+                        if is_3d_cell_tetrahedron[icon] {
+                            write_i32_binary(&mut out, 10);
+                        } else {
+                            write_i32_binary(&mut out, 12);
+                        }
+                    }
+                    for _ in 0..nb_elts_sph {
+                        write_i32_binary(&mut out, 1);
+                    }
+                } else {
+                    for _ in 0..nb_elts_1d {
+                        writeln!(out, "3").unwrap();
+                    }
+                    for icon in 0..nb_facets {
+                        if is_2d_triangle[icon] {
+                            writeln!(out, "5").unwrap();
+                        } else {
+                            writeln!(out, "9").unwrap();
+                        }
+                    }
+                    for icon in 0..nb_elts_3d {
+                        if is_3d_cell_tetrahedron[icon] {
+                            writeln!(out, "10").unwrap();
+                        } else {
+                            writeln!(out, "12").unwrap();
+                        }
+                    }
+                    for _ in 0..nb_elts_sph {
+                        writeln!(out, "1").unwrap();
+                    }
                 }
             }
             writeln!(out).unwrap();
@@ -600,8 +700,14 @@ fn read_radioss_anim(file_name: &str) {
             // node id
             writeln!(out, "SCALARS NODE_ID int 1").unwrap();
             writeln!(out, "LOOKUP_TABLE default").unwrap();
-            for inod in 0..nb_nodes {
-                writeln!(out, "{}", nod_num_a[inod]).unwrap();
+            if binary_format {
+                for inod in 0..nb_nodes {
+                    write_i32_binary(&mut out, nod_num_a[inod]);
+                }
+            } else {
+                for inod in 0..nb_nodes {
+                    writeln!(out, "{}", nod_num_a[inod]).unwrap();
+                }
             }
             writeln!(out).unwrap();
 
@@ -609,8 +715,14 @@ fn read_radioss_anim(file_name: &str) {
                 let name = replace_underscore(&f_text_a[ifun]);
                 writeln!(out, "SCALARS {} float 1", name).unwrap();
                 writeln!(out, "LOOKUP_TABLE default").unwrap();
-                for inod in 0..nb_nodes {
-                    writeln!(out, "{}", func_a[ifun * nb_nodes + inod]).unwrap();
+                if binary_format {
+                    for inod in 0..nb_nodes {
+                        write_f32_binary(&mut out, func_a[ifun * nb_nodes + inod]);
+                    }
+                } else {
+                    for inod in 0..nb_nodes {
+                        writeln!(out, "{}", func_a[ifun * nb_nodes + inod]).unwrap();
+                    }
                 }
                 writeln!(out).unwrap();
             }
@@ -618,15 +730,23 @@ fn read_radioss_anim(file_name: &str) {
             for ivect in 0..nb_vect {
                 let name = replace_underscore(&v_text_a[ivect]);
                 writeln!(out, "VECTORS {} float", name).unwrap();
-                for inod in 0..nb_nodes {
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        vect_val_a[3 * inod + ivect * 3 * nb_nodes],
-                        vect_val_a[3 * inod + 1 + ivect * 3 * nb_nodes],
-                        vect_val_a[3 * inod + 2 + ivect * 3 * nb_nodes]
-                    )
-                    .unwrap();
+                if binary_format {
+                    for inod in 0..nb_nodes {
+                        write_f32_binary(&mut out, vect_val_a[3 * inod + ivect * 3 * nb_nodes]);
+                        write_f32_binary(&mut out, vect_val_a[3 * inod + 1 + ivect * 3 * nb_nodes]);
+                        write_f32_binary(&mut out, vect_val_a[3 * inod + 2 + ivect * 3 * nb_nodes]);
+                    }
+                } else {
+                    for inod in 0..nb_nodes {
+                        writeln!(
+                            out,
+                            "{} {} {}",
+                            vect_val_a[3 * inod + ivect * 3 * nb_nodes],
+                            vect_val_a[3 * inod + 1 + ivect * 3 * nb_nodes],
+                            vect_val_a[3 * inod + 2 + ivect * 3 * nb_nodes]
+                        )
+                        .unwrap();
+                    }
                 }
                 writeln!(out).unwrap();
             }
@@ -636,17 +756,32 @@ fn read_radioss_anim(file_name: &str) {
             // element id
             writeln!(out, "SCALARS ELEMENT_ID int 1").unwrap();
             writeln!(out, "LOOKUP_TABLE default").unwrap();
-            for iel in 0..nb_elts_1d {
-                writeln!(out, "{}", el_num_1d[iel]).unwrap();
-            }
-            for iel in 0..nb_facets {
-                writeln!(out, "{}", el_num_a[iel]).unwrap();
-            }
-            for iel in 0..nb_elts_3d {
-                writeln!(out, "{}", el_num_3d[iel]).unwrap();
-            }
-            for iel in 0..nb_elts_sph {
-                writeln!(out, "{}", nod_num_sph[iel]).unwrap();
+            if binary_format {
+                for iel in 0..nb_elts_1d {
+                    write_i32_binary(&mut out, el_num_1d[iel]);
+                }
+                for iel in 0..nb_facets {
+                    write_i32_binary(&mut out, el_num_a[iel]);
+                }
+                for iel in 0..nb_elts_3d {
+                    write_i32_binary(&mut out, el_num_3d[iel]);
+                }
+                for iel in 0..nb_elts_sph {
+                    write_i32_binary(&mut out, nod_num_sph[iel]);
+                }
+            } else {
+                for iel in 0..nb_elts_1d {
+                    writeln!(out, "{}", el_num_1d[iel]).unwrap();
+                }
+                for iel in 0..nb_facets {
+                    writeln!(out, "{}", el_num_a[iel]).unwrap();
+                }
+                for iel in 0..nb_elts_3d {
+                    writeln!(out, "{}", el_num_3d[iel]).unwrap();
+                }
+                for iel in 0..nb_elts_sph {
+                    writeln!(out, "{}", nod_num_sph[iel]).unwrap();
+                }
             }
             writeln!(out).unwrap();
 
@@ -659,60 +794,119 @@ fn read_radioss_anim(file_name: &str) {
             let mut part_3d_index: usize = 0;
             let mut part_0d_index: usize = 0;
 
-            for iel in 0..nb_elts_1d {
-                if part_1d_index < nb_parts_1d && iel == def_part_1d[part_1d_index] as usize {
-                    part_1d_index += 1;
+            if binary_format {
+                for iel in 0..nb_elts_1d {
+                    if part_1d_index < nb_parts_1d && iel == def_part_1d[part_1d_index] as usize {
+                        part_1d_index += 1;
+                    }
+                    if part_1d_index < nb_parts_1d {
+                        let val: i32 = p_text_1d[part_1d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        write_i32_binary(&mut out, val);
+                    } else {
+                        write_i32_binary(&mut out, 0);
+                    }
                 }
-                if part_1d_index < nb_parts_1d {
-                    let val: i32 = p_text_1d[part_1d_index]
-                        .trim()
-                        .parse()
-                        .unwrap_or(0);
-                    writeln!(out, "{}", val).unwrap();
-                } else {
-                    writeln!(out, "0").unwrap();
+                for iel in 0..nb_facets {
+                    if part_2d_index < nb_parts && iel == def_part_a[part_2d_index] as usize {
+                        part_2d_index += 1;
+                    }
+                    if part_2d_index < nb_parts {
+                        let val: i32 = p_text_a[part_2d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        write_i32_binary(&mut out, val);
+                    } else {
+                        write_i32_binary(&mut out, 0);
+                    }
                 }
-            }
-            for iel in 0..nb_facets {
-                if part_2d_index < nb_parts && iel == def_part_a[part_2d_index] as usize {
-                    part_2d_index += 1;
+                for iel in 0..nb_elts_3d {
+                    if part_3d_index < p_text_3d.len() && iel == def_part_3d[part_3d_index] as usize {
+                        part_3d_index += 1;
+                    }
+                    if part_3d_index < p_text_3d.len() {
+                        let val: i32 = p_text_3d[part_3d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        write_i32_binary(&mut out, val);
+                    } else {
+                        write_i32_binary(&mut out, 0);
+                    }
                 }
-                if part_2d_index < nb_parts {
-                    let val: i32 = p_text_a[part_2d_index]
-                        .trim()
-                        .parse()
-                        .unwrap_or(0);
-                    writeln!(out, "{}", val).unwrap();
-                } else {
-                    writeln!(out, "0").unwrap();
+                for iel in 0..nb_elts_sph {
+                    if part_0d_index < p_text_sph.len() && iel == def_part_sph[part_0d_index] as usize {
+                        part_0d_index += 1;
+                    }
+                    if part_0d_index < p_text_sph.len() {
+                        let val: i32 = p_text_sph[part_0d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        write_i32_binary(&mut out, val);
+                    } else {
+                        write_i32_binary(&mut out, 0);
+                    }
                 }
-            }
-            for iel in 0..nb_elts_3d {
-                if part_3d_index < p_text_3d.len() && iel == def_part_3d[part_3d_index] as usize {
-                    part_3d_index += 1;
+            } else {
+                for iel in 0..nb_elts_1d {
+                    if part_1d_index < nb_parts_1d && iel == def_part_1d[part_1d_index] as usize {
+                        part_1d_index += 1;
+                    }
+                    if part_1d_index < nb_parts_1d {
+                        let val: i32 = p_text_1d[part_1d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        writeln!(out, "{}", val).unwrap();
+                    } else {
+                        writeln!(out, "0").unwrap();
+                    }
                 }
-                if part_3d_index < p_text_3d.len() {
-                    let val: i32 = p_text_3d[part_3d_index]
-                        .trim()
-                        .parse()
-                        .unwrap_or(0);
-                    writeln!(out, "{}", val).unwrap();
-                } else {
-                    writeln!(out, "0").unwrap();
+                for iel in 0..nb_facets {
+                    if part_2d_index < nb_parts && iel == def_part_a[part_2d_index] as usize {
+                        part_2d_index += 1;
+                    }
+                    if part_2d_index < nb_parts {
+                        let val: i32 = p_text_a[part_2d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        writeln!(out, "{}", val).unwrap();
+                    } else {
+                        writeln!(out, "0").unwrap();
+                    }
                 }
-            }
-            for iel in 0..nb_elts_sph {
-                if part_0d_index < p_text_sph.len() && iel == def_part_sph[part_0d_index] as usize {
-                    part_0d_index += 1;
+                for iel in 0..nb_elts_3d {
+                    if part_3d_index < p_text_3d.len() && iel == def_part_3d[part_3d_index] as usize {
+                        part_3d_index += 1;
+                    }
+                    if part_3d_index < p_text_3d.len() {
+                        let val: i32 = p_text_3d[part_3d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        writeln!(out, "{}", val).unwrap();
+                    } else {
+                        writeln!(out, "0").unwrap();
+                    }
                 }
-                if part_0d_index < p_text_sph.len() {
-                    let val: i32 = p_text_sph[part_0d_index]
-                        .trim()
-                        .parse()
-                        .unwrap_or(0);
-                    writeln!(out, "{}", val).unwrap();
-                } else {
-                    writeln!(out, "0").unwrap();
+                for iel in 0..nb_elts_sph {
+                    if part_0d_index < p_text_sph.len() && iel == def_part_sph[part_0d_index] as usize {
+                        part_0d_index += 1;
+                    }
+                    if part_0d_index < p_text_sph.len() {
+                        let val: i32 = p_text_sph[part_0d_index]
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        writeln!(out, "{}", val).unwrap();
+                    } else {
+                        writeln!(out, "0").unwrap();
+                    }
                 }
             }
             writeln!(out).unwrap();
@@ -720,17 +914,32 @@ fn read_radioss_anim(file_name: &str) {
             // element erosion status (0:off, 1:on)
             writeln!(out, "SCALARS EROSION_STATUS int 1").unwrap();
             writeln!(out, "LOOKUP_TABLE default").unwrap();
-            for iel in 0..nb_elts_1d {
-                writeln!(out, "{}", if del_elt_1d[iel] != 0 { 1 } else { 0 }).unwrap();
-            }
-            for iel in 0..nb_facets {
-                writeln!(out, "{}", if del_elt_a[iel] != 0 { 1 } else { 0 }).unwrap();
-            }
-            for iel in 0..nb_elts_3d {
-                writeln!(out, "{}", if del_elt_3d[iel] != 0 { 1 } else { 0 }).unwrap();
-            }
-            for iel in 0..nb_elts_sph {
-                writeln!(out, "{}", if del_elt_sph[iel] != 0 { 1 } else { 0 }).unwrap();
+            if binary_format {
+                for iel in 0..nb_elts_1d {
+                    write_i32_binary(&mut out, if del_elt_1d[iel] != 0 { 1 } else { 0 });
+                }
+                for iel in 0..nb_facets {
+                    write_i32_binary(&mut out, if del_elt_a[iel] != 0 { 1 } else { 0 });
+                }
+                for iel in 0..nb_elts_3d {
+                    write_i32_binary(&mut out, if del_elt_3d[iel] != 0 { 1 } else { 0 });
+                }
+                for iel in 0..nb_elts_sph {
+                    write_i32_binary(&mut out, if del_elt_sph[iel] != 0 { 1 } else { 0 });
+                }
+            } else {
+                for iel in 0..nb_elts_1d {
+                    writeln!(out, "{}", if del_elt_1d[iel] != 0 { 1 } else { 0 }).unwrap();
+                }
+                for iel in 0..nb_facets {
+                    writeln!(out, "{}", if del_elt_a[iel] != 0 { 1 } else { 0 }).unwrap();
+                }
+                for iel in 0..nb_elts_3d {
+                    writeln!(out, "{}", if del_elt_3d[iel] != 0 { 1 } else { 0 }).unwrap();
+                }
+                for iel in 0..nb_elts_sph {
+                    writeln!(out, "{}", if del_elt_sph[iel] != 0 { 1 } else { 0 }).unwrap();
+                }
             }
             writeln!(out).unwrap();
 
@@ -739,17 +948,32 @@ fn read_radioss_anim(file_name: &str) {
                 let name = replace_underscore(&f_text_1d[iefun]);
                 writeln!(out, "SCALARS 1DELEM_{} float 1", name).unwrap();
                 writeln!(out, "LOOKUP_TABLE default").unwrap();
-                for iel in 0..nb_elts_1d {
-                    writeln!(out, "{}", efunc_1d[iefun * nb_elts_1d + iel]).unwrap();
-                }
-                for _ in 0..nb_facets {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_elts_3d {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0").unwrap();
+                if binary_format {
+                    for iel in 0..nb_elts_1d {
+                        write_f32_binary(&mut out, efunc_1d[iefun * nb_elts_1d + iel]);
+                    }
+                    for _ in 0..nb_facets {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                    for _ in 0..nb_elts_3d {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                    for _ in 0..nb_elts_sph {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                } else {
+                    for iel in 0..nb_elts_1d {
+                        writeln!(out, "{}", efunc_1d[iefun * nb_elts_1d + iel]).unwrap();
+                    }
+                    for _ in 0..nb_facets {
+                        writeln!(out, "0").unwrap();
+                    }
+                    for _ in 0..nb_elts_3d {
+                        writeln!(out, "0").unwrap();
+                    }
+                    for _ in 0..nb_elts_sph {
+                        writeln!(out, "0").unwrap();
+                    }
                 }
                 writeln!(out).unwrap();
             }
@@ -766,22 +990,40 @@ fn read_radioss_anim(file_name: &str) {
                     )
                     .unwrap();
                     writeln!(out, "LOOKUP_TABLE default").unwrap();
-                    for iel in 0..nb_elts_1d {
-                        writeln!(
-                            out,
-                            "{}",
-                            tors_val_1d[9 * iefun * nb_elts_1d + iel * 9 + j]
-                        )
-                        .unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "0").unwrap();
+                    if binary_format {
+                        for iel in 0..nb_elts_1d {
+                            write_f32_binary(
+                                &mut out,
+                                tors_val_1d[9 * iefun * nb_elts_1d + iel * 9 + j],
+                            );
+                        }
+                        for _ in 0..nb_facets {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                        for _ in 0..nb_elts_3d {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                        for _ in 0..nb_elts_sph {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                    } else {
+                        for iel in 0..nb_elts_1d {
+                            writeln!(
+                                out,
+                                "{}",
+                                tors_val_1d[9 * iefun * nb_elts_1d + iel * 9 + j]
+                            )
+                            .unwrap();
+                        }
+                        for _ in 0..nb_facets {
+                            writeln!(out, "0").unwrap();
+                        }
+                        for _ in 0..nb_elts_3d {
+                            writeln!(out, "0").unwrap();
+                        }
+                        for _ in 0..nb_elts_sph {
+                            writeln!(out, "0").unwrap();
+                        }
                     }
                     writeln!(out).unwrap();
                 }
@@ -792,17 +1034,32 @@ fn read_radioss_anim(file_name: &str) {
                 let name = replace_underscore(&f_text_a[iefun + nb_func]);
                 writeln!(out, "SCALARS 2DELEM_{} float 1", name).unwrap();
                 writeln!(out, "LOOKUP_TABLE default").unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0").unwrap();
-                }
-                for iel in 0..nb_facets {
-                    writeln!(out, "{}", efunc_a[iefun * nb_facets + iel]).unwrap();
-                }
-                for _ in 0..nb_elts_3d {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0").unwrap();
+                if binary_format {
+                    for _ in 0..nb_elts_1d {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                    for iel in 0..nb_facets {
+                        write_f32_binary(&mut out, efunc_a[iefun * nb_facets + iel]);
+                    }
+                    for _ in 0..nb_elts_3d {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                    for _ in 0..nb_elts_sph {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                } else {
+                    for _ in 0..nb_elts_1d {
+                        writeln!(out, "0").unwrap();
+                    }
+                    for iel in 0..nb_facets {
+                        writeln!(out, "{}", efunc_a[iefun * nb_facets + iel]).unwrap();
+                    }
+                    for _ in 0..nb_elts_3d {
+                        writeln!(out, "0").unwrap();
+                    }
+                    for _ in 0..nb_elts_sph {
+                        writeln!(out, "0").unwrap();
+                    }
                 }
                 writeln!(out).unwrap();
             }
@@ -811,36 +1068,66 @@ fn read_radioss_anim(file_name: &str) {
             for ietens in 0..nb_tens {
                 let name = replace_underscore(&t_text_a[ietens]);
                 writeln!(out, "TENSORS 2DELEM_{} float", name).unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
-                for iel in 0..nb_facets {
-                    let base = iel * 3 + ietens * 3 * nb_facets;
-                    writeln!(
-                        out,
-                        "{} {} 0 ",
-                        tens_val_a[base], tens_val_a[base + 2]
-                    )
-                    .unwrap();
-                    writeln!(
-                        out,
-                        "{} {} 0 ",
-                        tens_val_a[base + 2], tens_val_a[base + 1]
-                    )
-                    .unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
-                for _ in 0..nb_elts_3d {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
+                if binary_format {
+                    for _ in 0..nb_elts_1d {
+                        for _ in 0..9 {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                    }
+                    for iel in 0..nb_facets {
+                        let base = iel * 3 + ietens * 3 * nb_facets;
+                        write_f32_binary(&mut out, tens_val_a[base]);
+                        write_f32_binary(&mut out, tens_val_a[base + 2]);
+                        write_f32_binary(&mut out, 0.0);
+                        write_f32_binary(&mut out, tens_val_a[base + 2]);
+                        write_f32_binary(&mut out, tens_val_a[base + 1]);
+                        write_f32_binary(&mut out, 0.0);
+                        write_f32_binary(&mut out, 0.0);
+                        write_f32_binary(&mut out, 0.0);
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                    for _ in 0..nb_elts_3d {
+                        for _ in 0..9 {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                    }
+                    for _ in 0..nb_elts_sph {
+                        for _ in 0..9 {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                    }
+                } else {
+                    for _ in 0..nb_elts_1d {
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                    }
+                    for iel in 0..nb_facets {
+                        let base = iel * 3 + ietens * 3 * nb_facets;
+                        writeln!(
+                            out,
+                            "{} {} 0 ",
+                            tens_val_a[base], tens_val_a[base + 2]
+                        )
+                        .unwrap();
+                        writeln!(
+                            out,
+                            "{} {} 0 ",
+                            tens_val_a[base + 2], tens_val_a[base + 1]
+                        )
+                        .unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                    }
+                    for _ in 0..nb_elts_3d {
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                    }
+                    for _ in 0..nb_elts_sph {
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                    }
                 }
                 writeln!(out).unwrap();
             }
@@ -850,17 +1137,32 @@ fn read_radioss_anim(file_name: &str) {
                 let name = replace_underscore(&f_text_3d[iefun]);
                 writeln!(out, "SCALARS 3DELEM_{} float 1", name).unwrap();
                 writeln!(out, "LOOKUP_TABLE default").unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0").unwrap();
-                }
-                for _ in 0..nb_facets {
-                    writeln!(out, "0").unwrap();
-                }
-                for iel in 0..nb_elts_3d {
-                    writeln!(out, "{}", efunc_3d[iefun * nb_elts_3d + iel]).unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0").unwrap();
+                if binary_format {
+                    for _ in 0..nb_elts_1d {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                    for _ in 0..nb_facets {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                    for iel in 0..nb_elts_3d {
+                        write_f32_binary(&mut out, efunc_3d[iefun * nb_elts_3d + iel]);
+                    }
+                    for _ in 0..nb_elts_sph {
+                        write_f32_binary(&mut out, 0.0);
+                    }
+                } else {
+                    for _ in 0..nb_elts_1d {
+                        writeln!(out, "0").unwrap();
+                    }
+                    for _ in 0..nb_facets {
+                        writeln!(out, "0").unwrap();
+                    }
+                    for iel in 0..nb_elts_3d {
+                        writeln!(out, "{}", efunc_3d[iefun * nb_elts_3d + iel]).unwrap();
+                    }
+                    for _ in 0..nb_elts_sph {
+                        writeln!(out, "0").unwrap();
+                    }
                 }
                 writeln!(out).unwrap();
             }
@@ -869,47 +1171,77 @@ fn read_radioss_anim(file_name: &str) {
             for ietens in 0..nb_tens_3d {
                 let name = replace_underscore(&t_text_3d[ietens]);
                 writeln!(out, "TENSORS 3DELEM_{} float", name).unwrap();
-                for _ in 0..nb_elts_1d {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
-                for _ in 0..nb_facets {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                }
-                for iel in 0..nb_elts_3d {
-                    let base = iel * 6 + ietens * 6 * nb_elts_3d;
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        tens_val_3d[base],
-                        tens_val_3d[base + 3],
-                        tens_val_3d[base + 4]
-                    )
-                    .unwrap();
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        tens_val_3d[base + 3],
-                        tens_val_3d[base + 1],
-                        tens_val_3d[base + 5]
-                    )
-                    .unwrap();
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        tens_val_3d[base + 4],
-                        tens_val_3d[base + 5],
-                        tens_val_3d[base + 2]
-                    )
-                    .unwrap();
-                }
-                for _ in 0..nb_elts_sph {
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
-                    writeln!(out, "0 0 0 ").unwrap();
+                if binary_format {
+                    for _ in 0..nb_elts_1d {
+                        for _ in 0..9 {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                    }
+                    for _ in 0..nb_facets {
+                        for _ in 0..9 {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                    }
+                    for iel in 0..nb_elts_3d {
+                        let base = iel * 6 + ietens * 6 * nb_elts_3d;
+                        write_f32_binary(&mut out, tens_val_3d[base]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 3]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 4]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 3]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 1]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 5]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 4]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 5]);
+                        write_f32_binary(&mut out, tens_val_3d[base + 2]);
+                    }
+                    for _ in 0..nb_elts_sph {
+                        for _ in 0..9 {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                    }
+                } else {
+                    for _ in 0..nb_elts_1d {
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                    }
+                    for _ in 0..nb_facets {
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                    }
+                    for iel in 0..nb_elts_3d {
+                        let base = iel * 6 + ietens * 6 * nb_elts_3d;
+                        writeln!(
+                            out,
+                            "{} {} {}",
+                            tens_val_3d[base],
+                            tens_val_3d[base + 3],
+                            tens_val_3d[base + 4]
+                        )
+                        .unwrap();
+                        writeln!(
+                            out,
+                            "{} {} {}",
+                            tens_val_3d[base + 3],
+                            tens_val_3d[base + 1],
+                            tens_val_3d[base + 5]
+                        )
+                        .unwrap();
+                        writeln!(
+                            out,
+                            "{} {} {}",
+                            tens_val_3d[base + 4],
+                            tens_val_3d[base + 5],
+                            tens_val_3d[base + 2]
+                        )
+                        .unwrap();
+                    }
+                    for _ in 0..nb_elts_sph {
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                        writeln!(out, "0 0 0 ").unwrap();
+                    }
                 }
                 writeln!(out).unwrap();
             }
@@ -920,17 +1252,32 @@ fn read_radioss_anim(file_name: &str) {
                     let name = replace_underscore(&scal_text_sph[iefun]);
                     writeln!(out, "SCALARS SPHELEM_{} float 1", name).unwrap();
                     writeln!(out, "LOOKUP_TABLE default").unwrap();
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for iel in 0..nb_elts_sph {
-                        writeln!(out, "{}", efunc_sph[iefun * nb_elts_sph + iel]).unwrap();
+                    if binary_format {
+                        for _ in 0..nb_elts_1d {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                        for _ in 0..nb_facets {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                        for _ in 0..nb_elts_3d {
+                            write_f32_binary(&mut out, 0.0);
+                        }
+                        for iel in 0..nb_elts_sph {
+                            write_f32_binary(&mut out, efunc_sph[iefun * nb_elts_sph + iel]);
+                        }
+                    } else {
+                        for _ in 0..nb_elts_1d {
+                            writeln!(out, "0").unwrap();
+                        }
+                        for _ in 0..nb_facets {
+                            writeln!(out, "0").unwrap();
+                        }
+                        for _ in 0..nb_elts_3d {
+                            writeln!(out, "0").unwrap();
+                        }
+                        for iel in 0..nb_elts_sph {
+                            writeln!(out, "{}", efunc_sph[iefun * nb_elts_sph + iel]).unwrap();
+                        }
                     }
                     writeln!(out).unwrap();
                 }
@@ -938,47 +1285,77 @@ fn read_radioss_anim(file_name: &str) {
                 for ietens in 0..nb_tens_sph {
                     let name = replace_underscore(&tens_text_sph[ietens]);
                     writeln!(out, "TENSORS SPHELEM_{} float", name).unwrap();
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for iel in 0..nb_elts_sph {
-                        let base = iel * 6 + ietens * 6 * nb_elts_sph;
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            tens_val_sph[base],
-                            tens_val_sph[base + 3],
-                            tens_val_sph[base + 4]
-                        )
-                        .unwrap();
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            tens_val_sph[base + 3],
-                            tens_val_sph[base + 1],
-                            tens_val_sph[base + 5]
-                        )
-                        .unwrap();
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            tens_val_sph[base + 4],
-                            tens_val_sph[base + 5],
-                            tens_val_sph[base + 2]
-                        )
-                        .unwrap();
+                    if binary_format {
+                        for _ in 0..nb_elts_1d {
+                            for _ in 0..9 {
+                                write_f32_binary(&mut out, 0.0);
+                            }
+                        }
+                        for _ in 0..nb_facets {
+                            for _ in 0..9 {
+                                write_f32_binary(&mut out, 0.0);
+                            }
+                        }
+                        for _ in 0..nb_elts_3d {
+                            for _ in 0..9 {
+                                write_f32_binary(&mut out, 0.0);
+                            }
+                        }
+                        for iel in 0..nb_elts_sph {
+                            let base = iel * 6 + ietens * 6 * nb_elts_sph;
+                            write_f32_binary(&mut out, tens_val_sph[base]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 3]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 4]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 3]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 1]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 5]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 4]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 5]);
+                            write_f32_binary(&mut out, tens_val_sph[base + 2]);
+                        }
+                    } else {
+                        for _ in 0..nb_elts_1d {
+                            writeln!(out, "0 0 0 ").unwrap();
+                            writeln!(out, "0 0 0 ").unwrap();
+                            writeln!(out, "0 0 0 ").unwrap();
+                        }
+                        for _ in 0..nb_facets {
+                            writeln!(out, "0 0 0 ").unwrap();
+                            writeln!(out, "0 0 0 ").unwrap();
+                            writeln!(out, "0 0 0 ").unwrap();
+                        }
+                        for _ in 0..nb_elts_3d {
+                            writeln!(out, "0 0 0 ").unwrap();
+                            writeln!(out, "0 0 0 ").unwrap();
+                            writeln!(out, "0 0 0 ").unwrap();
+                        }
+                        for iel in 0..nb_elts_sph {
+                            let base = iel * 6 + ietens * 6 * nb_elts_sph;
+                            writeln!(
+                                out,
+                                "{} {} {}",
+                                tens_val_sph[base],
+                                tens_val_sph[base + 3],
+                                tens_val_sph[base + 4]
+                            )
+                            .unwrap();
+                            writeln!(
+                                out,
+                                "{} {} {}",
+                                tens_val_sph[base + 3],
+                                tens_val_sph[base + 1],
+                                tens_val_sph[base + 5]
+                            )
+                            .unwrap();
+                            writeln!(
+                                out,
+                                "{} {} {}",
+                                tens_val_sph[base + 4],
+                                tens_val_sph[base + 5],
+                                tens_val_sph[base + 2]
+                            )
+                            .unwrap();
+                        }
                     }
                     writeln!(out).unwrap();
                 }
@@ -995,8 +1372,13 @@ fn read_radioss_anim(file_name: &str) {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Call a filename");
+        eprintln!("Usage: {} <filename> [--binary]", args[0]);
+        eprintln!("  --binary : Output in binary VTK format (default is ASCII)");
         process::exit(1);
     }
-    read_radioss_anim(&args[1]);
+    
+    let file_name = &args[1];
+    let binary_format = args.len() > 2 && (args[2] == "--binary" || args[2] == "-b");
+    
+    read_radioss_anim(file_name, binary_format);
 }
