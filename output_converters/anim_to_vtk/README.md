@@ -4,9 +4,9 @@ anim_to_vtk is an external tool to convert OpenRadioss animation files to legacy
 
 ## How to build
 
-### Linux
+A Rust toolchain installation is required. Install from https://rustup.rs/
 
-gcc/g++ compiler installation requested.
+### Linux
 
 Enter the platform directory : anim_to_vtk/linux64
 Apply the build script : ./build.bash
@@ -15,8 +15,6 @@ Executable will be copied in [OpenRadioss]/exec directory
 
 ### Linux ARM64
 
-gcc/g++ compiler installation requested.
-
 Enter the platform directory : anim_to_vtk/linuxa64
 Apply the build script : ./build.bash
 
@@ -24,13 +22,18 @@ Executable will be copied in [OpenRadioss]/exec directory
 
 ### Windows
 
-Visual Studio Community, Enterprise or Professional Edition installation is required.
-Launch Visual Studio Shell for X86-64 Native tools.
-
 Enter the platform directory : anim_to_vtk/win64
 Apply the script : build.bat
 
 Executable is copied in [OpenRadioss]/exec
+
+### Using Cargo directly
+
+From the anim_to_vtk directory:
+
+        cargo build --release
+
+The executable will be in target/release/anim_to_vtk (or target\release\anim_to_vtk.exe on Windows).
 
 ## How to use
 
