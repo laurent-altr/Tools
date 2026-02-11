@@ -207,8 +207,6 @@ fn read_radioss_anim(file_name: &str) {
             // 3D GEOMETRY
             // ********************
             let mut nb_elts_3d: usize = 0;
-            #[allow(unused_assignments)]
-            let mut nb_parts_3d: usize = 0;
             let mut nb_efunc_3d: usize = 0;
             let mut nb_tens_3d: usize = 0;
             let mut connect_3d: Vec<i32> = Vec::new();
@@ -223,7 +221,7 @@ fn read_radioss_anim(file_name: &str) {
 
             if flag_a[2] != 0 {
                 nb_elts_3d = read_i32(&mut inf) as usize;
-                nb_parts_3d = read_i32(&mut inf) as usize;
+                let nb_parts_3d = read_i32(&mut inf) as usize;
                 nb_efunc_3d = read_i32(&mut inf) as usize;
                 nb_tens_3d = read_i32(&mut inf) as usize;
 
@@ -391,8 +389,6 @@ fn read_radioss_anim(file_name: &str) {
             // READ SPH PART
             // ********************
             let mut nb_elts_sph: usize = 0;
-            #[allow(unused_assignments)]
-            let mut nb_parts_sph: usize = 0;
             let mut nb_efunc_sph: usize = 0;
             let mut nb_tens_sph: usize = 0;
             let mut connec_sph: Vec<i32> = Vec::new();
@@ -407,7 +403,7 @@ fn read_radioss_anim(file_name: &str) {
 
             if flag_a[7] != 0 {
                 nb_elts_sph = read_i32(&mut inf) as usize;
-                nb_parts_sph = read_i32(&mut inf) as usize;
+                let nb_parts_sph = read_i32(&mut inf) as usize;
                 nb_efunc_sph = read_i32(&mut inf) as usize;
                 nb_tens_sph = read_i32(&mut inf) as usize;
 
@@ -678,34 +674,46 @@ fn read_radioss_anim(file_name: &str) {
                 }
             }
             for iel in 0..nb_facets {
-                if iel == def_part_a[part_2d_index] as usize {
+                if part_2d_index < nb_parts && iel == def_part_a[part_2d_index] as usize {
                     part_2d_index += 1;
                 }
-                let val: i32 = p_text_a[part_2d_index]
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                writeln!(out, "{}", val).unwrap();
+                if part_2d_index < nb_parts {
+                    let val: i32 = p_text_a[part_2d_index]
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
+                    writeln!(out, "{}", val).unwrap();
+                } else {
+                    writeln!(out, "0").unwrap();
+                }
             }
             for iel in 0..nb_elts_3d {
-                if iel == def_part_3d[part_3d_index] as usize {
+                if part_3d_index < p_text_3d.len() && iel == def_part_3d[part_3d_index] as usize {
                     part_3d_index += 1;
                 }
-                let val: i32 = p_text_3d[part_3d_index]
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                writeln!(out, "{}", val).unwrap();
+                if part_3d_index < p_text_3d.len() {
+                    let val: i32 = p_text_3d[part_3d_index]
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
+                    writeln!(out, "{}", val).unwrap();
+                } else {
+                    writeln!(out, "0").unwrap();
+                }
             }
             for iel in 0..nb_elts_sph {
-                if iel == def_part_sph[part_0d_index] as usize {
+                if part_0d_index < p_text_sph.len() && iel == def_part_sph[part_0d_index] as usize {
                     part_0d_index += 1;
                 }
-                let val: i32 = p_text_sph[part_0d_index]
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                writeln!(out, "{}", val).unwrap();
+                if part_0d_index < p_text_sph.len() {
+                    let val: i32 = p_text_sph[part_0d_index]
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
+                    writeln!(out, "{}", val).unwrap();
+                } else {
+                    writeln!(out, "0").unwrap();
+                }
             }
             writeln!(out).unwrap();
 
