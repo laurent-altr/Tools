@@ -94,21 +94,6 @@ fn replace_underscore(s: &str) -> String {
 }
 
 // ****************************************
-// write binary data to stdout
-// ****************************************
-fn write_i32_binary<W: Write>(out: &mut BufWriter<W>, val: i32) {
-    out.write_all(&val.to_be_bytes()).unwrap();
-}
-
-fn write_f32_binary<W: Write>(out: &mut BufWriter<W>, val: f32) {
-    out.write_all(&val.to_be_bytes()).unwrap();
-}
-
-fn write_f64_binary<W: Write>(out: &mut BufWriter<W>, val: f64) {
-    out.write_all(&val.to_be_bytes()).unwrap();
-}
-
-// ****************************************
 // VtkWriter - abstraction for VTK output in binary or ASCII format
 // ****************************************
 struct VtkWriter<W: Write> {
@@ -185,6 +170,10 @@ impl<W: Write> VtkWriter<W> {
 
     fn flush(&mut self) {
         self.writer.flush().unwrap();
+    }
+
+    fn writer(&mut self) -> &mut BufWriter<W> {
+        &mut self.writer
     }
 }
 
@@ -320,7 +309,7 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
         process::exit(1);
     });
 
-    let mut out = BufWriter::new(writer);
+    let mut vtk = VtkWriter::new(writer, binary_format);
 
     let magic = read_i32(&mut inf);
 
@@ -662,52 +651,33 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
             // ********************
             // VTK output
             // ********************
-            writeln!(out, "# vtk DataFile Version 3.0").unwrap();
-            writeln!(out, "vtk output").unwrap();
+            vtk.write_header("# vtk DataFile Version 3.0");
+            vtk.write_header("vtk output");
             if binary_format {
-                writeln!(out, "BINARY").unwrap();
+                vtk.write_header("BINARY");
             } else {
-                writeln!(out, "ASCII").unwrap();
+                vtk.write_header("ASCII");
             }
-            writeln!(out, "DATASET UNSTRUCTURED_GRID").unwrap();
+            vtk.write_header("DATASET UNSTRUCTURED_GRID");
 
-            writeln!(out, "FIELD FieldData 2").unwrap();
-            writeln!(out, "TIME 1 1 double").unwrap();
-            if binary_format {
-                write_f64_binary(&mut out, a_time as f64);
-                writeln!(out).unwrap();
-            } else {
-                writeln!(out, "{}", a_time).unwrap();
-            }
-            writeln!(out, "CYCLE 1 1 int").unwrap();
-            if binary_format {
-                write_i32_binary(&mut out, 0);
-                writeln!(out).unwrap();
-            } else {
-                writeln!(out, "0").unwrap();
-            }
+            vtk.write_header("FIELD FieldData 2");
+            vtk.write_header("TIME 1 1 double");
+            vtk.write_f64(a_time as f64);
+            vtk.newline();
+            vtk.write_header("CYCLE 1 1 int");
+            vtk.write_i32(0);
+            vtk.newline();
 
             // nodes
-            writeln!(out, "POINTS {} float", nb_nodes).unwrap();
-            if binary_format {
-                for inod in 0..nb_nodes {
-                    write_f32_binary(&mut out, coor_a[3 * inod]);
-                    write_f32_binary(&mut out, coor_a[3 * inod + 1]);
-                    write_f32_binary(&mut out, coor_a[3 * inod + 2]);
-                }
-            } else {
-                for inod in 0..nb_nodes {
-                    writeln!(
-                        out,
-                        "{} {} {}",
-                        coor_a[3 * inod],
-                        coor_a[3 * inod + 1],
-                        coor_a[3 * inod + 2]
-                    )
-                    .unwrap();
-                }
+            vtk.write_header(&format!("POINTS {} float", nb_nodes));
+            for inod in 0..nb_nodes {
+                vtk.write_f32_triple(
+                    coor_a[3 * inod],
+                    coor_a[3 * inod + 1],
+                    coor_a[3 * inod + 2],
+                );
             }
-            writeln!(out).unwrap();
+            vtk.newline();
 
             // detect tetrahedra in 3D cells
             let mut is_3d_cell_tetrahedron: Vec<bool> = Vec::new();
@@ -748,22 +718,22 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
                     + tetrahedron_count * 5
                     + (nb_elts_3d - tetrahedron_count) * 9
                     + nb_elts_sph * 2;
-                writeln!(out, "CELLS {} {}", total_cells, cells_size).unwrap();
+                vtk.write_header(&format!("CELLS {} {}", total_cells, cells_size));
 
                 if binary_format {
                     // 1D elements
                     for icon in 0..nb_elts_1d {
-                        write_i32_binary(&mut out, 2);
-                        write_i32_binary(&mut out, connect_1d[icon * 2]);
-                        write_i32_binary(&mut out, connect_1d[icon * 2 + 1]);
+                        vtk.write_i32(2);
+                        vtk.write_i32(connect_1d[icon * 2]);
+                        vtk.write_i32(connect_1d[icon * 2 + 1]);
                     }
                     // 2D elements
                     for icon in 0..nb_facets {
-                        write_i32_binary(&mut out, 4);
-                        write_i32_binary(&mut out, connect_a[icon * 4]);
-                        write_i32_binary(&mut out, connect_a[icon * 4 + 1]);
-                        write_i32_binary(&mut out, connect_a[icon * 4 + 2]);
-                        write_i32_binary(&mut out, connect_a[icon * 4 + 3]);
+                        vtk.write_i32(4);
+                        vtk.write_i32(connect_a[icon * 4]);
+                        vtk.write_i32(connect_a[icon * 4 + 1]);
+                        vtk.write_i32(connect_a[icon * 4 + 2]);
+                        vtk.write_i32(connect_a[icon * 4 + 3]);
                     }
                     // 3D elements
                     for icon in 0..nb_elts_3d {
@@ -772,23 +742,24 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
                             for i in 0..8 {
                                 nodes.insert(connect_3d[icon * 8 + i]);
                             }
-                            write_i32_binary(&mut out, 4);
+                            vtk.write_i32(4);
                             for n in &nodes {
-                                write_i32_binary(&mut out, *n);
+                                vtk.write_i32(*n);
                             }
                         } else {
-                            write_i32_binary(&mut out, 8);
+                            vtk.write_i32(8);
                             for i in 0..8 {
-                                write_i32_binary(&mut out, connect_3d[icon * 8 + i]);
+                                vtk.write_i32(connect_3d[icon * 8 + i]);
                             }
                         }
                     }
                     // SPH elements
                     for icon in 0..nb_elts_sph {
-                        write_i32_binary(&mut out, 1);
-                        write_i32_binary(&mut out, connec_sph[icon]);
+                        vtk.write_i32(1);
+                        vtk.write_i32(connec_sph[icon]);
                     }
                 } else {
+                    let out = vtk.writer();
                     // 1D elements
                     for icon in 0..nb_elts_1d {
                         writeln!(
@@ -845,339 +816,127 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
                     }
                 }
             }
-            writeln!(out).unwrap();
+            vtk.newline();
 
             // element types
             if total_cells > 0 {
-                writeln!(out, "CELL_TYPES {}", total_cells).unwrap();
-                if binary_format {
-                    for _ in 0..nb_elts_1d {
-                        write_i32_binary(&mut out, 3);
-                    }
-                    for icon in 0..nb_facets {
-                        if is_2d_triangle[icon] {
-                            write_i32_binary(&mut out, 5);
-                        } else {
-                            write_i32_binary(&mut out, 9);
-                        }
-                    }
-                    for icon in 0..nb_elts_3d {
-                        if is_3d_cell_tetrahedron[icon] {
-                            write_i32_binary(&mut out, 10);
-                        } else {
-                            write_i32_binary(&mut out, 12);
-                        }
-                    }
-                    for _ in 0..nb_elts_sph {
-                        write_i32_binary(&mut out, 1);
-                    }
-                } else {
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "3").unwrap();
-                    }
-                    for icon in 0..nb_facets {
-                        if is_2d_triangle[icon] {
-                            writeln!(out, "5").unwrap();
-                        } else {
-                            writeln!(out, "9").unwrap();
-                        }
-                    }
-                    for icon in 0..nb_elts_3d {
-                        if is_3d_cell_tetrahedron[icon] {
-                            writeln!(out, "10").unwrap();
-                        } else {
-                            writeln!(out, "12").unwrap();
-                        }
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "1").unwrap();
+                vtk.write_header(&format!("CELL_TYPES {}", total_cells));
+                for _ in 0..nb_elts_1d {
+                    vtk.write_i32(3);
+                }
+                for icon in 0..nb_facets {
+                    if is_2d_triangle[icon] {
+                        vtk.write_i32(5);
+                    } else {
+                        vtk.write_i32(9);
                     }
                 }
+                for icon in 0..nb_elts_3d {
+                    if is_3d_cell_tetrahedron[icon] {
+                        vtk.write_i32(10);
+                    } else {
+                        vtk.write_i32(12);
+                    }
+                }
+                for _ in 0..nb_elts_sph {
+                    vtk.write_i32(1);
+                }
             }
-            writeln!(out).unwrap();
+            vtk.newline();
 
             // nodal scalars & vectors
-            writeln!(out, "POINT_DATA {}", nb_nodes).unwrap();
+            vtk.write_header(&format!("POINT_DATA {}", nb_nodes));
 
             // node id
-            writeln!(out, "SCALARS NODE_ID int 1").unwrap();
-            writeln!(out, "LOOKUP_TABLE default").unwrap();
-            if binary_format {
-                for inod in 0..nb_nodes {
-                    write_i32_binary(&mut out, nod_num_a[inod]);
-                }
-            } else {
-                for inod in 0..nb_nodes {
-                    writeln!(out, "{}", nod_num_a[inod]).unwrap();
-                }
+            vtk.write_header("SCALARS NODE_ID int 1");
+            vtk.write_header("LOOKUP_TABLE default");
+            for inod in 0..nb_nodes {
+                vtk.write_i32(nod_num_a[inod]);
             }
-            writeln!(out).unwrap();
+            vtk.newline();
 
             for ifun in 0..nb_func {
                 let name = replace_underscore(&f_text_a[ifun]);
-                writeln!(out, "SCALARS {} float 1", name).unwrap();
-                writeln!(out, "LOOKUP_TABLE default").unwrap();
-                if binary_format {
-                    for inod in 0..nb_nodes {
-                        write_f32_binary(&mut out, func_a[ifun * nb_nodes + inod]);
-                    }
-                } else {
-                    for inod in 0..nb_nodes {
-                        writeln!(out, "{}", func_a[ifun * nb_nodes + inod]).unwrap();
-                    }
+                vtk.write_header(&format!("SCALARS {} float 1", name));
+                vtk.write_header("LOOKUP_TABLE default");
+                for inod in 0..nb_nodes {
+                    vtk.write_f32(func_a[ifun * nb_nodes + inod]);
                 }
-                writeln!(out).unwrap();
+                vtk.newline();
             }
 
             for ivect in 0..nb_vect {
                 let name = replace_underscore(&v_text_a[ivect]);
-                writeln!(out, "VECTORS {} float", name).unwrap();
-                if binary_format {
-                    for inod in 0..nb_nodes {
-                        write_f32_binary(&mut out, vect_val_a[3 * inod + ivect * 3 * nb_nodes]);
-                        write_f32_binary(&mut out, vect_val_a[3 * inod + 1 + ivect * 3 * nb_nodes]);
-                        write_f32_binary(&mut out, vect_val_a[3 * inod + 2 + ivect * 3 * nb_nodes]);
-                    }
-                } else {
-                    for inod in 0..nb_nodes {
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            vect_val_a[3 * inod + ivect * 3 * nb_nodes],
-                            vect_val_a[3 * inod + 1 + ivect * 3 * nb_nodes],
-                            vect_val_a[3 * inod + 2 + ivect * 3 * nb_nodes]
-                        )
-                        .unwrap();
-                    }
+                vtk.write_header(&format!("VECTORS {} float", name));
+                for inod in 0..nb_nodes {
+                    vtk.write_f32_triple(
+                        vect_val_a[3 * inod + ivect * 3 * nb_nodes],
+                        vect_val_a[3 * inod + 1 + ivect * 3 * nb_nodes],
+                        vect_val_a[3 * inod + 2 + ivect * 3 * nb_nodes],
+                    );
                 }
-                writeln!(out).unwrap();
+                vtk.newline();
             }
 
-            writeln!(out, "CELL_DATA {}", total_cells).unwrap();
+            vtk.write_header(&format!("CELL_DATA {}", total_cells));
 
             // element id
-            writeln!(out, "SCALARS ELEMENT_ID int 1").unwrap();
-            writeln!(out, "LOOKUP_TABLE default").unwrap();
-            if binary_format {
-                for iel in 0..nb_elts_1d {
-                    write_i32_binary(&mut out, el_num_1d[iel]);
-                }
-                for iel in 0..nb_facets {
-                    write_i32_binary(&mut out, el_num_a[iel]);
-                }
-                for iel in 0..nb_elts_3d {
-                    write_i32_binary(&mut out, el_num_3d[iel]);
-                }
-                for iel in 0..nb_elts_sph {
-                    write_i32_binary(&mut out, nod_num_sph[iel]);
-                }
-            } else {
-                for iel in 0..nb_elts_1d {
-                    writeln!(out, "{}", el_num_1d[iel]).unwrap();
-                }
-                for iel in 0..nb_facets {
-                    writeln!(out, "{}", el_num_a[iel]).unwrap();
-                }
-                for iel in 0..nb_elts_3d {
-                    writeln!(out, "{}", el_num_3d[iel]).unwrap();
-                }
-                for iel in 0..nb_elts_sph {
-                    writeln!(out, "{}", nod_num_sph[iel]).unwrap();
-                }
-            }
-            writeln!(out).unwrap();
+            vtk.write_header("SCALARS ELEMENT_ID int 1");
+            vtk.write_header("LOOKUP_TABLE default");
+            write_cell_i32_values(&mut vtk, &[&el_num_1d, &el_num_a, &el_num_3d, &nod_num_sph]);
 
             // part id
-            writeln!(out, "SCALARS PART_ID int 1").unwrap();
-            writeln!(out, "LOOKUP_TABLE default").unwrap();
+            vtk.write_header("SCALARS PART_ID int 1");
+            vtk.write_header("LOOKUP_TABLE default");
 
             let mut part_1d_index: usize = 0;
             let mut part_2d_index: usize = 0;
             let mut part_3d_index: usize = 0;
             let mut part_0d_index: usize = 0;
 
-            if binary_format {
-                for iel in 0..nb_elts_1d {
-                    if part_1d_index < nb_parts_1d && iel == def_part_1d[part_1d_index] as usize {
-                        part_1d_index += 1;
-                    }
-                    if part_1d_index < nb_parts_1d {
-                        let val: i32 = p_text_1d[part_1d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        write_i32_binary(&mut out, val);
-                    } else {
-                        write_i32_binary(&mut out, 0);
-                    }
-                }
-                for iel in 0..nb_facets {
-                    if part_2d_index < nb_parts && iel == def_part_a[part_2d_index] as usize {
-                        part_2d_index += 1;
-                    }
-                    if part_2d_index < nb_parts {
-                        let val: i32 = p_text_a[part_2d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        write_i32_binary(&mut out, val);
-                    } else {
-                        write_i32_binary(&mut out, 0);
-                    }
-                }
-                for iel in 0..nb_elts_3d {
-                    if part_3d_index < p_text_3d.len() && iel == def_part_3d[part_3d_index] as usize {
-                        part_3d_index += 1;
-                    }
-                    if part_3d_index < p_text_3d.len() {
-                        let val: i32 = p_text_3d[part_3d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        write_i32_binary(&mut out, val);
-                    } else {
-                        write_i32_binary(&mut out, 0);
-                    }
-                }
-                for iel in 0..nb_elts_sph {
-                    if part_0d_index < p_text_sph.len() && iel == def_part_sph[part_0d_index] as usize {
-                        part_0d_index += 1;
-                    }
-                    if part_0d_index < p_text_sph.len() {
-                        let val: i32 = p_text_sph[part_0d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        write_i32_binary(&mut out, val);
-                    } else {
-                        write_i32_binary(&mut out, 0);
-                    }
-                }
-            } else {
-                for iel in 0..nb_elts_1d {
-                    if part_1d_index < nb_parts_1d && iel == def_part_1d[part_1d_index] as usize {
-                        part_1d_index += 1;
-                    }
-                    if part_1d_index < nb_parts_1d {
-                        let val: i32 = p_text_1d[part_1d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        writeln!(out, "{}", val).unwrap();
-                    } else {
-                        writeln!(out, "0").unwrap();
-                    }
-                }
-                for iel in 0..nb_facets {
-                    if part_2d_index < nb_parts && iel == def_part_a[part_2d_index] as usize {
-                        part_2d_index += 1;
-                    }
-                    if part_2d_index < nb_parts {
-                        let val: i32 = p_text_a[part_2d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        writeln!(out, "{}", val).unwrap();
-                    } else {
-                        writeln!(out, "0").unwrap();
-                    }
-                }
-                for iel in 0..nb_elts_3d {
-                    if part_3d_index < p_text_3d.len() && iel == def_part_3d[part_3d_index] as usize {
-                        part_3d_index += 1;
-                    }
-                    if part_3d_index < p_text_3d.len() {
-                        let val: i32 = p_text_3d[part_3d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        writeln!(out, "{}", val).unwrap();
-                    } else {
-                        writeln!(out, "0").unwrap();
-                    }
-                }
-                for iel in 0..nb_elts_sph {
-                    if part_0d_index < p_text_sph.len() && iel == def_part_sph[part_0d_index] as usize {
-                        part_0d_index += 1;
-                    }
-                    if part_0d_index < p_text_sph.len() {
-                        let val: i32 = p_text_sph[part_0d_index]
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        writeln!(out, "{}", val).unwrap();
-                    } else {
-                        writeln!(out, "0").unwrap();
-                    }
-                }
+            for iel in 0..nb_elts_1d {
+                let val = resolve_part_id(iel, &mut part_1d_index, &def_part_1d, &p_text_1d);
+                vtk.write_i32(val);
             }
-            writeln!(out).unwrap();
+            for iel in 0..nb_facets {
+                let val = resolve_part_id(iel, &mut part_2d_index, &def_part_a, &p_text_a);
+                vtk.write_i32(val);
+            }
+            for iel in 0..nb_elts_3d {
+                let val = resolve_part_id(iel, &mut part_3d_index, &def_part_3d, &p_text_3d);
+                vtk.write_i32(val);
+            }
+            for iel in 0..nb_elts_sph {
+                let val = resolve_part_id(iel, &mut part_0d_index, &def_part_sph, &p_text_sph);
+                vtk.write_i32(val);
+            }
+            vtk.newline();
 
             // element erosion status (0:off, 1:on)
-            writeln!(out, "SCALARS EROSION_STATUS int 1").unwrap();
-            writeln!(out, "LOOKUP_TABLE default").unwrap();
-            if binary_format {
-                for iel in 0..nb_elts_1d {
-                    write_i32_binary(&mut out, if del_elt_1d[iel] != 0 { 1 } else { 0 });
-                }
-                for iel in 0..nb_facets {
-                    write_i32_binary(&mut out, if del_elt_a[iel] != 0 { 1 } else { 0 });
-                }
-                for iel in 0..nb_elts_3d {
-                    write_i32_binary(&mut out, if del_elt_3d[iel] != 0 { 1 } else { 0 });
-                }
-                for iel in 0..nb_elts_sph {
-                    write_i32_binary(&mut out, if del_elt_sph[iel] != 0 { 1 } else { 0 });
-                }
-            } else {
-                for iel in 0..nb_elts_1d {
-                    writeln!(out, "{}", if del_elt_1d[iel] != 0 { 1 } else { 0 }).unwrap();
-                }
-                for iel in 0..nb_facets {
-                    writeln!(out, "{}", if del_elt_a[iel] != 0 { 1 } else { 0 }).unwrap();
-                }
-                for iel in 0..nb_elts_3d {
-                    writeln!(out, "{}", if del_elt_3d[iel] != 0 { 1 } else { 0 }).unwrap();
-                }
-                for iel in 0..nb_elts_sph {
-                    writeln!(out, "{}", if del_elt_sph[iel] != 0 { 1 } else { 0 }).unwrap();
-                }
+            vtk.write_header("SCALARS EROSION_STATUS int 1");
+            vtk.write_header("LOOKUP_TABLE default");
+            for iel in 0..nb_elts_1d {
+                vtk.write_i32(if del_elt_1d[iel] != 0 { 1 } else { 0 });
             }
-            writeln!(out).unwrap();
+            for iel in 0..nb_facets {
+                vtk.write_i32(if del_elt_a[iel] != 0 { 1 } else { 0 });
+            }
+            for iel in 0..nb_elts_3d {
+                vtk.write_i32(if del_elt_3d[iel] != 0 { 1 } else { 0 });
+            }
+            for iel in 0..nb_elts_sph {
+                vtk.write_i32(if del_elt_sph[iel] != 0 { 1 } else { 0 });
+            }
+            vtk.newline();
 
             // 1D elemental scalars
+            let counts = [nb_elts_1d, nb_facets, nb_elts_3d, nb_elts_sph];
             for iefun in 0..nb_efunc_1d {
                 let name = replace_underscore(&f_text_1d[iefun]);
-                writeln!(out, "SCALARS 1DELEM_{} float 1", name).unwrap();
-                writeln!(out, "LOOKUP_TABLE default").unwrap();
-                if binary_format {
-                    for iel in 0..nb_elts_1d {
-                        write_f32_binary(&mut out, efunc_1d[iefun * nb_elts_1d + iel]);
-                    }
-                    for _ in 0..nb_facets {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                    for _ in 0..nb_elts_3d {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                    for _ in 0..nb_elts_sph {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                } else {
-                    for iel in 0..nb_elts_1d {
-                        writeln!(out, "{}", efunc_1d[iefun * nb_elts_1d + iel]).unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "0").unwrap();
-                    }
-                }
-                writeln!(out).unwrap();
+                let values: Vec<f32> = (0..nb_elts_1d)
+                    .map(|iel| efunc_1d[iefun * nb_elts_1d + iel])
+                    .collect();
+                write_elemental_scalar(&mut vtk, &format!("1DELEM_{}", name), &counts, 0, &values);
             }
 
             // 1D torseur values
@@ -1185,383 +944,98 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
             for iefun in 0..nb_tors_1d {
                 for j in 0..9usize {
                     let name = replace_underscore(&t_text_1d[iefun]);
-                    writeln!(
-                        out,
-                        "SCALARS 1DELEM_{}{} float 1",
-                        name, tors_suffixes[j]
-                    )
-                    .unwrap();
-                    writeln!(out, "LOOKUP_TABLE default").unwrap();
-                    if binary_format {
-                        for iel in 0..nb_elts_1d {
-                            write_f32_binary(
-                                &mut out,
-                                tors_val_1d[9 * iefun * nb_elts_1d + iel * 9 + j],
-                            );
-                        }
-                        for _ in 0..nb_facets {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                        for _ in 0..nb_elts_3d {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                        for _ in 0..nb_elts_sph {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                    } else {
-                        for iel in 0..nb_elts_1d {
-                            writeln!(
-                                out,
-                                "{}",
-                                tors_val_1d[9 * iefun * nb_elts_1d + iel * 9 + j]
-                            )
-                            .unwrap();
-                        }
-                        for _ in 0..nb_facets {
-                            writeln!(out, "0").unwrap();
-                        }
-                        for _ in 0..nb_elts_3d {
-                            writeln!(out, "0").unwrap();
-                        }
-                        for _ in 0..nb_elts_sph {
-                            writeln!(out, "0").unwrap();
-                        }
-                    }
-                    writeln!(out).unwrap();
+                    let values: Vec<f32> = (0..nb_elts_1d)
+                        .map(|iel| tors_val_1d[9 * iefun * nb_elts_1d + iel * 9 + j])
+                        .collect();
+                    write_elemental_scalar(
+                        &mut vtk,
+                        &format!("1DELEM_{}{}", name, tors_suffixes[j]),
+                        &counts,
+                        0,
+                        &values,
+                    );
                 }
             }
 
             // 2D elemental scalars
             for iefun in 0..nb_efunc {
                 let name = replace_underscore(&f_text_a[iefun + nb_func]);
-                writeln!(out, "SCALARS 2DELEM_{} float 1", name).unwrap();
-                writeln!(out, "LOOKUP_TABLE default").unwrap();
-                if binary_format {
-                    for _ in 0..nb_elts_1d {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                    for iel in 0..nb_facets {
-                        write_f32_binary(&mut out, efunc_a[iefun * nb_facets + iel]);
-                    }
-                    for _ in 0..nb_elts_3d {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                    for _ in 0..nb_elts_sph {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                } else {
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for iel in 0..nb_facets {
-                        writeln!(out, "{}", efunc_a[iefun * nb_facets + iel]).unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "0").unwrap();
-                    }
-                }
-                writeln!(out).unwrap();
+                let values: Vec<f32> = (0..nb_facets)
+                    .map(|iel| efunc_a[iefun * nb_facets + iel])
+                    .collect();
+                write_elemental_scalar(&mut vtk, &format!("2DELEM_{}", name), &counts, 1, &values);
             }
 
             // 2D tensors
             for ietens in 0..nb_tens {
                 let name = replace_underscore(&t_text_a[ietens]);
-                writeln!(out, "TENSORS 2DELEM_{} float", name).unwrap();
-                if binary_format {
-                    for _ in 0..nb_elts_1d {
-                        for _ in 0..9 {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                    }
-                    for iel in 0..nb_facets {
+                let values: Vec<f32> = (0..nb_facets)
+                    .flat_map(|iel| {
                         let base = iel * 3 + ietens * 3 * nb_facets;
-                        write_f32_binary(&mut out, tens_val_a[base]);
-                        write_f32_binary(&mut out, tens_val_a[base + 2]);
-                        write_f32_binary(&mut out, 0.0);
-                        write_f32_binary(&mut out, tens_val_a[base + 2]);
-                        write_f32_binary(&mut out, tens_val_a[base + 1]);
-                        write_f32_binary(&mut out, 0.0);
-                        write_f32_binary(&mut out, 0.0);
-                        write_f32_binary(&mut out, 0.0);
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                    for _ in 0..nb_elts_3d {
-                        for _ in 0..9 {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                    }
-                    for _ in 0..nb_elts_sph {
-                        for _ in 0..9 {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                    }
-                } else {
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for iel in 0..nb_facets {
-                        let base = iel * 3 + ietens * 3 * nb_facets;
-                        writeln!(
-                            out,
-                            "{} {} 0 ",
-                            tens_val_a[base], tens_val_a[base + 2]
-                        )
-                        .unwrap();
-                        writeln!(
-                            out,
-                            "{} {} 0 ",
-                            tens_val_a[base + 2], tens_val_a[base + 1]
-                        )
-                        .unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for _ in 0..nb_elts_3d {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                }
-                writeln!(out).unwrap();
+                        vec![tens_val_a[base], tens_val_a[base + 1], tens_val_a[base + 2]]
+                    })
+                    .collect();
+                write_symmetric_tensor_3(&mut vtk, &format!("2DELEM_{}", name), &counts, 1, &values);
             }
 
             // 3D elemental scalars
             for iefun in 0..nb_efunc_3d {
                 let name = replace_underscore(&f_text_3d[iefun]);
-                writeln!(out, "SCALARS 3DELEM_{} float 1", name).unwrap();
-                writeln!(out, "LOOKUP_TABLE default").unwrap();
-                if binary_format {
-                    for _ in 0..nb_elts_1d {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                    for _ in 0..nb_facets {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                    for iel in 0..nb_elts_3d {
-                        write_f32_binary(&mut out, efunc_3d[iefun * nb_elts_3d + iel]);
-                    }
-                    for _ in 0..nb_elts_sph {
-                        write_f32_binary(&mut out, 0.0);
-                    }
-                } else {
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0").unwrap();
-                    }
-                    for iel in 0..nb_elts_3d {
-                        writeln!(out, "{}", efunc_3d[iefun * nb_elts_3d + iel]).unwrap();
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "0").unwrap();
-                    }
-                }
-                writeln!(out).unwrap();
+                let values: Vec<f32> = (0..nb_elts_3d)
+                    .map(|iel| efunc_3d[iefun * nb_elts_3d + iel])
+                    .collect();
+                write_elemental_scalar(&mut vtk, &format!("3DELEM_{}", name), &counts, 2, &values);
             }
 
             // 3D tensors
             for ietens in 0..nb_tens_3d {
                 let name = replace_underscore(&t_text_3d[ietens]);
-                writeln!(out, "TENSORS 3DELEM_{} float", name).unwrap();
-                if binary_format {
-                    for _ in 0..nb_elts_1d {
-                        for _ in 0..9 {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                    }
-                    for _ in 0..nb_facets {
-                        for _ in 0..9 {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                    }
-                    for iel in 0..nb_elts_3d {
+                let values: Vec<f32> = (0..nb_elts_3d)
+                    .flat_map(|iel| {
                         let base = iel * 6 + ietens * 6 * nb_elts_3d;
-                        write_f32_binary(&mut out, tens_val_3d[base]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 3]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 4]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 3]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 1]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 5]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 4]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 5]);
-                        write_f32_binary(&mut out, tens_val_3d[base + 2]);
-                    }
-                    for _ in 0..nb_elts_sph {
-                        for _ in 0..9 {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                    }
-                } else {
-                    for _ in 0..nb_elts_1d {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for _ in 0..nb_facets {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                    for iel in 0..nb_elts_3d {
-                        let base = iel * 6 + ietens * 6 * nb_elts_3d;
-                        writeln!(
-                            out,
-                            "{} {} {}",
+                        vec![
                             tens_val_3d[base],
-                            tens_val_3d[base + 3],
-                            tens_val_3d[base + 4]
-                        )
-                        .unwrap();
-                        writeln!(
-                            out,
-                            "{} {} {}",
-                            tens_val_3d[base + 3],
                             tens_val_3d[base + 1],
-                            tens_val_3d[base + 5]
-                        )
-                        .unwrap();
-                        writeln!(
-                            out,
-                            "{} {} {}",
+                            tens_val_3d[base + 2],
+                            tens_val_3d[base + 3],
                             tens_val_3d[base + 4],
                             tens_val_3d[base + 5],
-                            tens_val_3d[base + 2]
-                        )
-                        .unwrap();
-                    }
-                    for _ in 0..nb_elts_sph {
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                        writeln!(out, "0 0 0 ").unwrap();
-                    }
-                }
-                writeln!(out).unwrap();
+                        ]
+                    })
+                    .collect();
+                write_symmetric_tensor_6(&mut vtk, &format!("3DELEM_{}", name), &counts, 2, &values);
             }
 
             // SPH scalars and tensors
             if flag_a[7] != 0 {
                 for iefun in 0..nb_efunc_sph {
                     let name = replace_underscore(&scal_text_sph[iefun]);
-                    writeln!(out, "SCALARS SPHELEM_{} float 1", name).unwrap();
-                    writeln!(out, "LOOKUP_TABLE default").unwrap();
-                    if binary_format {
-                        for _ in 0..nb_elts_1d {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                        for _ in 0..nb_facets {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                        for _ in 0..nb_elts_3d {
-                            write_f32_binary(&mut out, 0.0);
-                        }
-                        for iel in 0..nb_elts_sph {
-                            write_f32_binary(&mut out, efunc_sph[iefun * nb_elts_sph + iel]);
-                        }
-                    } else {
-                        for _ in 0..nb_elts_1d {
-                            writeln!(out, "0").unwrap();
-                        }
-                        for _ in 0..nb_facets {
-                            writeln!(out, "0").unwrap();
-                        }
-                        for _ in 0..nb_elts_3d {
-                            writeln!(out, "0").unwrap();
-                        }
-                        for iel in 0..nb_elts_sph {
-                            writeln!(out, "{}", efunc_sph[iefun * nb_elts_sph + iel]).unwrap();
-                        }
-                    }
-                    writeln!(out).unwrap();
+                    let values: Vec<f32> = (0..nb_elts_sph)
+                        .map(|iel| efunc_sph[iefun * nb_elts_sph + iel])
+                        .collect();
+                    write_elemental_scalar(&mut vtk, &format!("SPHELEM_{}", name), &counts, 3, &values);
                 }
 
                 for ietens in 0..nb_tens_sph {
                     let name = replace_underscore(&tens_text_sph[ietens]);
-                    writeln!(out, "TENSORS SPHELEM_{} float", name).unwrap();
-                    if binary_format {
-                        for _ in 0..nb_elts_1d {
-                            for _ in 0..9 {
-                                write_f32_binary(&mut out, 0.0);
-                            }
-                        }
-                        for _ in 0..nb_facets {
-                            for _ in 0..9 {
-                                write_f32_binary(&mut out, 0.0);
-                            }
-                        }
-                        for _ in 0..nb_elts_3d {
-                            for _ in 0..9 {
-                                write_f32_binary(&mut out, 0.0);
-                            }
-                        }
-                        for iel in 0..nb_elts_sph {
+                    let values: Vec<f32> = (0..nb_elts_sph)
+                        .flat_map(|iel| {
                             let base = iel * 6 + ietens * 6 * nb_elts_sph;
-                            write_f32_binary(&mut out, tens_val_sph[base]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 3]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 4]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 3]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 1]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 5]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 4]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 5]);
-                            write_f32_binary(&mut out, tens_val_sph[base + 2]);
-                        }
-                    } else {
-                        for _ in 0..nb_elts_1d {
-                            writeln!(out, "0 0 0 ").unwrap();
-                            writeln!(out, "0 0 0 ").unwrap();
-                            writeln!(out, "0 0 0 ").unwrap();
-                        }
-                        for _ in 0..nb_facets {
-                            writeln!(out, "0 0 0 ").unwrap();
-                            writeln!(out, "0 0 0 ").unwrap();
-                            writeln!(out, "0 0 0 ").unwrap();
-                        }
-                        for _ in 0..nb_elts_3d {
-                            writeln!(out, "0 0 0 ").unwrap();
-                            writeln!(out, "0 0 0 ").unwrap();
-                            writeln!(out, "0 0 0 ").unwrap();
-                        }
-                        for iel in 0..nb_elts_sph {
-                            let base = iel * 6 + ietens * 6 * nb_elts_sph;
-                            writeln!(
-                                out,
-                                "{} {} {}",
+                            vec![
                                 tens_val_sph[base],
-                                tens_val_sph[base + 3],
-                                tens_val_sph[base + 4]
-                            )
-                            .unwrap();
-                            writeln!(
-                                out,
-                                "{} {} {}",
-                                tens_val_sph[base + 3],
                                 tens_val_sph[base + 1],
-                                tens_val_sph[base + 5]
-                            )
-                            .unwrap();
-                            writeln!(
-                                out,
-                                "{} {} {}",
+                                tens_val_sph[base + 2],
+                                tens_val_sph[base + 3],
                                 tens_val_sph[base + 4],
                                 tens_val_sph[base + 5],
-                                tens_val_sph[base + 2]
-                            )
-                            .unwrap();
-                        }
-                    }
-                    writeln!(out).unwrap();
+                            ]
+                        })
+                        .collect();
+                    write_symmetric_tensor_6(&mut vtk, &format!("SPHELEM_{}", name), &counts, 3, &values);
                 }
             }
+
+            vtk.flush();
         }
 
         _ => {
