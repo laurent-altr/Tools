@@ -1392,15 +1392,47 @@ fn main() {
     }
     
     // Process each input file
+    let mut failed_files = Vec::new();
+    let mut successful_files = 0;
+    
     for file_name in input_files {
-        let output_file_name = format!("{}.vtk", file_name);
+        // Determine output filename - don't add .vtk if it already exists
+        let output_file_name = if file_name.ends_with(".vtk") {
+            file_name.clone()
+        } else {
+            format!("{}.vtk", file_name)
+        };
         
-        let output_file = File::create(&output_file_name).unwrap_or_else(|_| {
-            eprintln!("Can't create output file {}", output_file_name);
-            process::exit(1);
-        });
+        // Verify input file exists before creating output file
+        if !std::path::Path::new(file_name.as_str()).exists() {
+            eprintln!("Error: Input file {} does not exist", file_name);
+            failed_files.push(file_name.clone());
+            continue;
+        }
+        
+        let output_file = match File::create(&output_file_name) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Error: Can't create output file {}: {}", output_file_name, e);
+                failed_files.push(file_name.clone());
+                continue;
+            }
+        };
         
         eprintln!("Converting {} to {}", file_name, output_file_name);
         read_radioss_anim(file_name, binary_format, output_file);
+        successful_files += 1;
+    }
+    
+    // Report results
+    if !failed_files.is_empty() {
+        eprintln!("\nConversion summary: {} succeeded, {} failed", successful_files, failed_files.len());
+        eprintln!("Failed files:");
+        for file in &failed_files {
+            eprintln!("  - {}", file);
+        }
+        process::exit(1);
+    } else if successful_files > 1 {
+        eprintln!("\nConversion complete: {} files converted successfully", successful_files);
     }
 }
