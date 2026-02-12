@@ -109,6 +109,209 @@ fn write_f64_binary<W: Write>(out: &mut BufWriter<W>, val: f64) {
 }
 
 // ****************************************
+// VtkWriter - abstraction for VTK output in binary or ASCII format
+// ****************************************
+struct VtkWriter<W: Write> {
+    writer: BufWriter<W>,
+    binary: bool,
+}
+
+impl<W: Write> VtkWriter<W> {
+    fn new(writer: W, binary: bool) -> Self {
+        VtkWriter {
+            writer: BufWriter::new(writer),
+            binary,
+        }
+    }
+
+    fn write_i32(&mut self, val: i32) {
+        if self.binary {
+            self.writer.write_all(&val.to_be_bytes()).unwrap();
+        } else {
+            writeln!(self.writer, "{}", val).unwrap();
+        }
+    }
+
+    fn write_f32(&mut self, val: f32) {
+        if self.binary {
+            self.writer.write_all(&val.to_be_bytes()).unwrap();
+        } else {
+            writeln!(self.writer, "{}", val).unwrap();
+        }
+    }
+
+    fn write_f64(&mut self, val: f64) {
+        if self.binary {
+            self.writer.write_all(&val.to_be_bytes()).unwrap();
+        } else {
+            writeln!(self.writer, "{}", val).unwrap();
+        }
+    }
+
+    fn write_f32_triple(&mut self, a: f32, b: f32, c: f32) {
+        if self.binary {
+            self.writer.write_all(&a.to_be_bytes()).unwrap();
+            self.writer.write_all(&b.to_be_bytes()).unwrap();
+            self.writer.write_all(&c.to_be_bytes()).unwrap();
+        } else {
+            writeln!(self.writer, "{} {} {}", a, b, c).unwrap();
+        }
+    }
+
+    fn write_zeros_f32(&mut self, count: usize) {
+        if self.binary {
+            let zero_bytes = 0f32.to_be_bytes();
+            for _ in 0..count {
+                self.writer.write_all(&zero_bytes).unwrap();
+            }
+        } else {
+            for _ in 0..count {
+                writeln!(self.writer, "0").unwrap();
+            }
+        }
+    }
+
+    fn write_zero_tensor(&mut self) {
+        self.write_zeros_f32(9);
+    }
+
+    fn write_header(&mut self, text: &str) {
+        writeln!(self.writer, "{}", text).unwrap();
+    }
+
+    fn newline(&mut self) {
+        writeln!(self.writer).unwrap();
+    }
+
+    fn flush(&mut self) {
+        self.writer.flush().unwrap();
+    }
+}
+
+// ****************************************
+// Helper function: resolve part ID for an element
+// ****************************************
+fn resolve_part_id(iel: usize, part_index: &mut usize, def_part: &[i32], p_text: &[String]) -> i32 {
+    if *part_index < def_part.len() && iel == def_part[*part_index] as usize {
+        *part_index += 1;
+    }
+    if *part_index < p_text.len() {
+        p_text[*part_index].trim().parse().unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+// ****************************************
+// Helper function: write per-cell i32 values from multiple slices
+// ****************************************
+fn write_cell_i32_values<W: Write>(
+    writer: &mut VtkWriter<W>,
+    slices: &[&[i32]],
+) {
+    for slice in slices {
+        for &val in *slice {
+            writer.write_i32(val);
+        }
+    }
+    writer.newline();
+}
+
+// ****************************************
+// Helper function: write elemental scalar field with zero-padding
+// ****************************************
+fn write_elemental_scalar<W: Write>(
+    writer: &mut VtkWriter<W>,
+    name: &str,
+    counts: &[usize],       // [nb_1d, nb_2d, nb_3d, nb_sph]
+    active_idx: usize,      // which element type has actual values
+    values: &[f32],         // actual values for active element type
+) {
+    writer.write_header(&format!("SCALARS {} float 1", name));
+    writer.write_header("LOOKUP_TABLE default");
+    
+    for (idx, &count) in counts.iter().enumerate() {
+        if idx == active_idx {
+            for i in 0..count {
+                writer.write_f32(values[i]);
+            }
+        } else {
+            writer.write_zeros_f32(count);
+        }
+    }
+    writer.newline();
+}
+
+// ****************************************
+// Helper function: write symmetric tensor (6-component: 3D/SPH)
+// ****************************************
+fn write_symmetric_tensor_6<W: Write>(
+    writer: &mut VtkWriter<W>,
+    name: &str,
+    counts: &[usize],
+    active_idx: usize,
+    values: &[f32],         // [xx, yy, zz, xy, xz, yz] for each element
+) {
+    writer.write_header(&format!("TENSORS {} float", name));
+    
+    for (idx, &count) in counts.iter().enumerate() {
+        if idx == active_idx {
+            for i in 0..count {
+                let base = i * 6;
+                let xx = values[base];
+                let yy = values[base + 1];
+                let zz = values[base + 2];
+                let xy = values[base + 3];
+                let xz = values[base + 4];
+                let yz = values[base + 5];
+                
+                writer.write_f32_triple(xx, xy, xz);
+                writer.write_f32_triple(xy, yy, yz);
+                writer.write_f32_triple(xz, yz, zz);
+            }
+        } else {
+            for _ in 0..count {
+                writer.write_zero_tensor();
+            }
+        }
+    }
+    writer.newline();
+}
+
+// ****************************************
+// Helper function: write symmetric tensor (3-component: 2D)
+// ****************************************
+fn write_symmetric_tensor_3<W: Write>(
+    writer: &mut VtkWriter<W>,
+    name: &str,
+    counts: &[usize],
+    active_idx: usize,
+    values: &[f32],         // [xx, yy, xy] for each element
+) {
+    writer.write_header(&format!("TENSORS {} float", name));
+    
+    for (idx, &count) in counts.iter().enumerate() {
+        if idx == active_idx {
+            for i in 0..count {
+                let base = i * 3;
+                let xx = values[base];
+                let yy = values[base + 1];
+                let xy = values[base + 2];
+                
+                writer.write_f32_triple(xx, xy, 0.0);
+                writer.write_f32_triple(xy, yy, 0.0);
+                writer.write_f32_triple(0.0, 0.0, 0.0);
+            }
+        } else {
+            for _ in 0..count {
+                writer.write_zero_tensor();
+            }
+        }
+    }
+    writer.newline();
+}
+
+// ****************************************
 // convert an A-File to vtk format (ASCII or BINARY)
 // ****************************************
 fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) {
