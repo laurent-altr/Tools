@@ -1089,7 +1089,9 @@ fn main() {
         // Verify input file exists before creating output file
         if !std::path::Path::new(file_name.as_str()).exists() {
             eprintln!("Error: Input file {} does not exist", file_name);
-            failed_files.lock().unwrap().push((*file_name).clone());
+            failed_files.lock()
+                .expect("Failed to lock failed_files mutex")
+                .push((*file_name).clone());
             return;
         }
         
@@ -1097,19 +1099,28 @@ fn main() {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Error: Can't create output file {}: {}", output_file_name, e);
-                failed_files.lock().unwrap().push((*file_name).clone());
+                failed_files.lock()
+                    .expect("Failed to lock failed_files mutex")
+                    .push((*file_name).clone());
                 return;
             }
         };
         
         eprintln!("Converting {} to {}", file_name, output_file_name);
         read_radioss_anim(file_name, binary_format, output_file);
-        *successful_files.lock().unwrap() += 1;
+        *successful_files.lock()
+            .expect("Failed to lock successful_files mutex") += 1;
     });
     
     // Extract results from Arc<Mutex<>>
-    let failed_files = Arc::try_unwrap(failed_files).unwrap().into_inner().unwrap();
-    let successful_files = Arc::try_unwrap(successful_files).unwrap().into_inner().unwrap();
+    let failed_files = Arc::try_unwrap(failed_files)
+        .expect("Failed to unwrap Arc for failed_files")
+        .into_inner()
+        .expect("Failed to get inner value for failed_files");
+    let successful_files = Arc::try_unwrap(successful_files)
+        .expect("Failed to unwrap Arc for successful_files")
+        .into_inner()
+        .expect("Failed to get inner value for successful_files");
     
     // Report results
     if !failed_files.is_empty() {
