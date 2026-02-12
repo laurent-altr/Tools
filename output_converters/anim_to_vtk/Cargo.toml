@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "Convert OpenRadioss animation files to legacy VTK format (ASCII or binary)"
 license = "MIT"
+
+[dependencies]
+rayon = "1.10"

@@ -25,11 +25,13 @@
 // To launch conversion:
 //   anim_to_vtk animationFile > vtkFile
 
+use rayon::prelude::*;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::process;
+use std::sync::{Arc, Mutex};
 
 const FASTMAGI10: i32 = 0x542c;
 
@@ -1076,34 +1078,38 @@ fn main() {
         process::exit(1);
     }
     
-    // Process each input file
-    let mut failed_files = Vec::new();
-    let mut successful_files = 0;
+    // Process each input file in parallel
+    let failed_files = Arc::new(Mutex::new(Vec::new()));
+    let successful_files = Arc::new(Mutex::new(0));
     
-    for file_name in input_files {
+    input_files.par_iter().for_each(|file_name| {
         // Always append .vtk extension to create output filename
         let output_file_name = format!("{}.vtk", file_name);
         
         // Verify input file exists before creating output file
         if !std::path::Path::new(file_name.as_str()).exists() {
             eprintln!("Error: Input file {} does not exist", file_name);
-            failed_files.push(file_name.clone());
-            continue;
+            failed_files.lock().unwrap().push((*file_name).clone());
+            return;
         }
         
         let output_file = match File::create(&output_file_name) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Error: Can't create output file {}: {}", output_file_name, e);
-                failed_files.push(file_name.clone());
-                continue;
+                failed_files.lock().unwrap().push((*file_name).clone());
+                return;
             }
         };
         
         eprintln!("Converting {} to {}", file_name, output_file_name);
         read_radioss_anim(file_name, binary_format, output_file);
-        successful_files += 1;
-    }
+        *successful_files.lock().unwrap() += 1;
+    });
+    
+    // Extract results from Arc<Mutex<>>
+    let failed_files = Arc::try_unwrap(failed_files).unwrap().into_inner().unwrap();
+    let successful_files = Arc::try_unwrap(successful_files).unwrap().into_inner().unwrap();
     
     // Report results
     if !failed_files.is_empty() {
