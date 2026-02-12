@@ -1396,12 +1396,8 @@ fn main() {
     let mut successful_files = 0;
     
     for file_name in input_files {
-        // Determine output filename - don't add .vtk if it already exists
-        let output_file_name = if file_name.ends_with(".vtk") {
-            file_name.clone()
-        } else {
-            format!("{}.vtk", file_name)
-        };
+        // Always append .vtk extension to create output filename
+        let output_file_name = format!("{}.vtk", file_name);
         
         // Verify input file exists before creating output file
         if !std::path::Path::new(file_name.as_str()).exists() {

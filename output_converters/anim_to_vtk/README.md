@@ -81,16 +81,13 @@ The following Linux bash script can still be used for more complex batch process
 
         #!/bin/bash
         #
-        # Script to be launch in Animation file directory
+        # Script to be launched in Animation file directory
         #
         Rootname=[Deck Rootname]
         OpenRadioss_root=[Path to OpenRadioss installation]
-        # Set FORMAT to "--binary" for binary VTK or "" for ASCII VTK
-        FORMAT=""
-        for file in `ls ${Rootname}A*`
-        do
-          ${OpenRadioss_root}/exec/anim_to_vtk_linuxa64_gf $file ${FORMAT}
-        done
+        # Use "--binary" for binary VTK or leave empty for ASCII VTK
+        FORMAT="--binary"
+        ${OpenRadioss_root}/exec/anim_to_vtk_linuxa64_gf ${Rootname}A* ${FORMAT}
 
 In Paraview, the vtk files are bundled and can be loaded in one step.
 
