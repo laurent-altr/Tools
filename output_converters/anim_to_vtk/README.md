@@ -39,21 +39,45 @@ The executable will be in target/release/anim_to_vtk (or target\release\anim_to_
 
 ### Basic Usage
 
-Apply anim_to_vtk to each animation file to generate ASCII VTK format (default):
+The tool automatically creates output files with `.vtk` extension added to the input filename.
 
-        ./anim_to_vtk_linux64_gf [Deck Rootname]A001 > [Deck Rootname]_001.vtk
-        ./anim_to_vtk_linux64_gf [Deck Rootname]A002 > [Deck Rootname]_002.vtk
-        ...
+#### Convert a single file
+
+Generate ASCII VTK format (default):
+
+        ./anim_to_vtk_linux64_gf [Deck Rootname]A001
+
+This creates `[Deck Rootname]A001.vtk`
 
 To generate binary VTK format (smaller file size, faster I/O), use the `--binary` flag:
 
-        ./anim_to_vtk_linux64_gf [Deck Rootname]A001 --binary > [Deck Rootname]_001.vtk
-        ./anim_to_vtk_linux64_gf [Deck Rootname]A002 --binary > [Deck Rootname]_002.vtk
-        ...
+        ./anim_to_vtk_linux64_gf [Deck Rootname]A001 --binary
 
-### Batch Conversion Script
+#### Convert multiple files
 
-Following Linux bash script can be used to convert all files in a single task:
+You can convert multiple files in a single command:
+
+        ./anim_to_vtk_linux64_gf [Deck Rootname]A001 [Deck Rootname]A002 [Deck Rootname]A003
+
+Or with binary format:
+
+        ./anim_to_vtk_linux64_gf [Deck Rootname]A001 [Deck Rootname]A002 [Deck Rootname]A003 --binary
+
+The `--binary` flag can be placed anywhere in the command line arguments.
+
+#### Convert all animation files using wildcards
+
+Using shell wildcards to convert all animation files at once:
+
+        ./anim_to_vtk_linux64_gf [Deck Rootname]A*
+
+Or with binary format:
+
+        ./anim_to_vtk_linux64_gf [Deck Rootname]A* --binary
+
+### Legacy Batch Conversion Script (Optional)
+
+The following Linux bash script can still be used for more complex batch processing:
 
         #!/bin/bash
         #
@@ -65,8 +89,7 @@ Following Linux bash script can be used to convert all files in a single task:
         FORMAT=""
         for file in `ls ${Rootname}A*`
         do
-          animation_number=${file#"${Rootname}A"}
-          ${OpenRadioss_root}/exec/anim_to_vtk_linuxa64_gf $file ${FORMAT} > ${Rootname}_${animation_number}.vtk
+          ${OpenRadioss_root}/exec/anim_to_vtk_linuxa64_gf $file ${FORMAT}
         done
 
 In Paraview, the vtk files are bundled and can be loaded in one step.
