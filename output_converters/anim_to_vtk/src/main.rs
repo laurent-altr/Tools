@@ -179,8 +179,14 @@ impl<W: Write> VtkWriter<W> {
 
 // ****************************************
 // Helper function: resolve part ID for an element
+// Advances part_index at part boundaries and parses part ID from text
 // ****************************************
-fn resolve_part_id(iel: usize, part_index: &mut usize, def_part: &[i32], p_text: &[String]) -> i32 {
+fn resolve_part_id(
+    iel: usize,           // Element index
+    part_index: &mut usize, // Current part index (mutated at boundaries)
+    def_part: &[i32],     // Element indices where parts begin
+    p_text: &[String],    // Part ID strings (to be parsed as integers)
+) -> i32 {
     if *part_index < def_part.len() && iel == def_part[*part_index] as usize {
         *part_index += 1;
     }
@@ -759,6 +765,8 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
                         vtk.write_i32(connec_sph[icon]);
                     }
                 } else {
+                    // Note: Direct writer access needed here for specialized ASCII formatting
+                    // (e.g., double spaces in hex output, write!/writeln! combinations for triangles)
                     let out = vtk.writer();
                     // 1D elements
                     for icon in 0..nb_elts_1d {
@@ -895,20 +903,20 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
             let mut part_0d_index: usize = 0;
 
             for iel in 0..nb_elts_1d {
-                let val = resolve_part_id(iel, &mut part_1d_index, &def_part_1d, &p_text_1d);
-                vtk.write_i32(val);
+                let part_id = resolve_part_id(iel, &mut part_1d_index, &def_part_1d, &p_text_1d);
+                vtk.write_i32(part_id);
             }
             for iel in 0..nb_facets {
-                let val = resolve_part_id(iel, &mut part_2d_index, &def_part_a, &p_text_a);
-                vtk.write_i32(val);
+                let part_id = resolve_part_id(iel, &mut part_2d_index, &def_part_a, &p_text_a);
+                vtk.write_i32(part_id);
             }
             for iel in 0..nb_elts_3d {
-                let val = resolve_part_id(iel, &mut part_3d_index, &def_part_3d, &p_text_3d);
-                vtk.write_i32(val);
+                let part_id = resolve_part_id(iel, &mut part_3d_index, &def_part_3d, &p_text_3d);
+                vtk.write_i32(part_id);
             }
             for iel in 0..nb_elts_sph {
-                let val = resolve_part_id(iel, &mut part_0d_index, &def_part_sph, &p_text_sph);
-                vtk.write_i32(val);
+                let part_id = resolve_part_id(iel, &mut part_0d_index, &def_part_sph, &p_text_sph);
+                vtk.write_i32(part_id);
             }
             vtk.newline();
 
