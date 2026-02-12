@@ -28,7 +28,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::process;
 
 const FASTMAGI10: i32 = 0x542c;
@@ -96,29 +96,28 @@ fn replace_underscore(s: &str) -> String {
 // ****************************************
 // write binary data to stdout
 // ****************************************
-fn write_i32_binary(out: &mut BufWriter<io::StdoutLock>, val: i32) {
+fn write_i32_binary<W: Write>(out: &mut BufWriter<W>, val: i32) {
     out.write_all(&val.to_be_bytes()).unwrap();
 }
 
-fn write_f32_binary(out: &mut BufWriter<io::StdoutLock>, val: f32) {
+fn write_f32_binary<W: Write>(out: &mut BufWriter<W>, val: f32) {
     out.write_all(&val.to_be_bytes()).unwrap();
 }
 
-fn write_f64_binary(out: &mut BufWriter<io::StdoutLock>, val: f64) {
+fn write_f64_binary<W: Write>(out: &mut BufWriter<W>, val: f64) {
     out.write_all(&val.to_be_bytes()).unwrap();
 }
 
 // ****************************************
 // convert an A-File to vtk format (ASCII or BINARY)
 // ****************************************
-fn read_radioss_anim(file_name: &str, binary_format: bool) {
+fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) {
     let mut inf = File::open(file_name).unwrap_or_else(|_| {
         eprintln!("Can't open input file {}", file_name);
         process::exit(1);
     });
 
-    let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::new(writer);
 
     let magic = read_i32(&mut inf);
 
@@ -1372,13 +1371,36 @@ fn read_radioss_anim(file_name: &str, binary_format: bool) {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <filename> [--binary]", args[0]);
+        eprintln!("Usage: {} <filename1> [filename2 ...] [--binary]", args[0]);
         eprintln!("  --binary : Output in binary VTK format (default is ASCII)");
+        eprintln!("  Output files will have .vtk extension added automatically");
         process::exit(1);
     }
     
-    let file_name = &args[1];
-    let binary_format = args.len() > 2 && (args[2] == "--binary" || args[2] == "-b");
+    // Check if --binary flag is present
+    let binary_format = args.iter().any(|arg| arg == "--binary" || arg == "-b");
     
-    read_radioss_anim(file_name, binary_format);
+    // Collect all input files (skip program name and --binary flag)
+    let input_files: Vec<&String> = args[1..]
+        .iter()
+        .filter(|arg| *arg != "--binary" && *arg != "-b")
+        .collect();
+    
+    if input_files.is_empty() {
+        eprintln!("Error: No input files specified");
+        process::exit(1);
+    }
+    
+    // Process each input file
+    for file_name in input_files {
+        let output_file_name = format!("{}.vtk", file_name);
+        
+        let output_file = File::create(&output_file_name).unwrap_or_else(|_| {
+            eprintln!("Can't create output file {}", output_file_name);
+            process::exit(1);
+        });
+        
+        eprintln!("Converting {} to {}", file_name, output_file_name);
+        read_radioss_anim(file_name, binary_format, output_file);
+    }
 }
