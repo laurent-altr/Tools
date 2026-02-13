@@ -1267,42 +1267,44 @@ fn main() {
         calculate_thread_count(&file_sizes)
     };
     
-    // Configure Rayon thread pool with calculated thread count
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(thread_count)
-        .build_global()
-        .unwrap();
-    
     eprintln!();
     
     // Use Arc<Mutex<>> for thread-safe counters
     let failed_files = Arc::new(Mutex::new(Vec::new()));
     let successful_files = Arc::new(Mutex::new(0));
     
-    // Process files in parallel
-    input_files.par_iter().for_each(|file_name| {
-        // Always append .vtk extension to create output filename
-        let output_file_name = format!("{}.vtk", file_name);
-        
-        // Verify input file exists before creating output file
-        if !std::path::Path::new(file_name.as_str()).exists() {
-            eprintln!("Error: Input file {} does not exist", file_name);
-            failed_files.lock().unwrap().push(file_name.clone());
-            return;
-        }
-        
-        let output_file = match File::create(&output_file_name) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Error: Can't create output file {}: {}", output_file_name, e);
+    // Create a custom thread pool with calculated thread count
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build()
+        .expect("Failed to build thread pool");
+    
+    // Process files in parallel using the custom pool
+    pool.install(|| {
+        input_files.par_iter().for_each(|file_name| {
+            // Always append .vtk extension to create output filename
+            let output_file_name = format!("{}.vtk", file_name);
+            
+            // Verify input file exists before creating output file
+            if !std::path::Path::new(file_name.as_str()).exists() {
+                eprintln!("Error: Input file {} does not exist", file_name);
                 failed_files.lock().unwrap().push(file_name.clone());
                 return;
             }
-        };
-        
-        eprintln!("Converting {} to {}", file_name, output_file_name);
-        read_radioss_anim(file_name, binary_format, output_file);
-        *successful_files.lock().unwrap() += 1;
+            
+            let output_file = match File::create(&output_file_name) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Error: Can't create output file {}: {}", output_file_name, e);
+                    failed_files.lock().unwrap().push(file_name.clone());
+                    return;
+                }
+            };
+            
+            eprintln!("Converting {} to {}", file_name, output_file_name);
+            read_radioss_anim(file_name, binary_format, output_file);
+            *successful_files.lock().unwrap() += 1;
+        });
     });
     
     // Extract results from Arc<Mutex<>>
