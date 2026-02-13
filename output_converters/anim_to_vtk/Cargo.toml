@@ -8,3 +8,5 @@ license = "MIT"
 [dependencies]
 itoa = "1.0"
 ryu = "1.0"
+rayon = "1.10"
+sysinfo = "0.33"

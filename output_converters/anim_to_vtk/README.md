@@ -103,5 +103,16 @@ The Rust implementation is significantly faster than previous C++ implementation
 - Efficient buffered I/O strategy
 - Zero-allocation data processing
 - Reusable scratch buffers
+- **Parallel processing**: Multiple files are processed simultaneously using Rayon, with automatic memory-aware thread tuning
+
+### Parallel Processing
+
+When converting multiple files, the tool automatically:
+- Analyzes available system memory
+- Calculates the size of input files
+- Determines the optimal number of parallel threads to avoid memory exhaustion
+- Processes files in parallel using Rayon for maximum performance
+
+The parallel processing is completely automatic and requires no configuration. The tool will safely handle any number of files, automatically limiting parallelism based on available memory to prevent system overload.
 
 For detailed performance analysis and optimization techniques, see [PERFORMANCE.md](PERFORMANCE.md).
