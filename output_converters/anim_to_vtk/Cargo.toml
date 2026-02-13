@@ -7,4 +7,3 @@ license = "MIT"
 
 [dependencies]
 itoa = "1.0"
-ryu = "1.0"
