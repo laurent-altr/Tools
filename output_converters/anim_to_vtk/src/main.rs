@@ -302,6 +302,104 @@ fn unique_sorted_4(nodes: &[i32]) -> Option<[i32; 4]> {
 }
 
 // ****************************************
+// UnvWriter - abstraction for UNV output format
+// ****************************************
+struct UnvWriter<W: Write> {
+    writer: BufWriter<W>,
+    itoa_buf: ItoaBuffer,
+    ryu_buf: RyuBuffer,
+}
+
+impl<W: Write> UnvWriter<W> {
+    fn new(writer: W) -> Self {
+        UnvWriter {
+            writer: BufWriter::new(writer),
+            itoa_buf: ItoaBuffer::new(),
+            ryu_buf: RyuBuffer::new(),
+        }
+    }
+
+    fn write_dataset_header(&mut self, dataset_num: i32) {
+        // UNV format uses -1 as dataset separator
+        self.writer.write_all(b"    -1\n").unwrap();
+        let s = format!("{:6}\n", dataset_num);
+        self.writer.write_all(s.as_bytes()).unwrap();
+    }
+
+    fn write_dataset_footer(&mut self) {
+        self.writer.write_all(b"    -1\n").unwrap();
+    }
+
+    fn write_node(&mut self, node_id: i32, x: f32, y: f32, z: f32) {
+        // UNV dataset 2411 format:
+        // Line 1: node_label, export_coordinate_system_number, displacement_coordinate_system_number, color
+        let line1 = format!("{:10}         1         1         1\n", node_id);
+        self.writer.write_all(line1.as_bytes()).unwrap();
+        
+        // Line 2: x, y, z coordinates (3 values in 1P25.16E3 format)
+        let line2 = format!("{:25.16E}{:25.16E}{:25.16E}\n", x, y, z);
+        self.writer.write_all(line2.as_bytes()).unwrap();
+    }
+
+    fn write_element(&mut self, elem_id: i32, elem_type: i32, nodes: &[i32]) {
+        // UNV dataset 2412 format:
+        // Line 1: element_id, fe_descriptor_id, physical_property_table_number, material_property_table_number, color, number_of_nodes
+        let line1 = format!("{:10}{:10}         1         1        11{:10}\n", elem_id, elem_type, nodes.len());
+        self.writer.write_all(line1.as_bytes()).unwrap();
+        
+        // Line 2+: nodes (8 nodes per line)
+        for chunk in nodes.chunks(8) {
+            for &node_id in chunk {
+                let s = format!("{:10}", node_id);
+                self.writer.write_all(s.as_bytes()).unwrap();
+            }
+            self.writer.write_all(b"\n").unwrap();
+        }
+    }
+
+    fn write_analysis_data_header(&mut self, _dataset_num: i32, analysis_type: i32, data_type: i32, 
+                                    num_data_values: i32, label: &str) {
+        // UNV dataset 2414 format - simplified
+        // Line 1: analysis_dataset_label, analysis_dataset_name
+        let line1 = format!("{:10} {}\n", 1, label);
+        self.writer.write_all(line1.as_bytes()).unwrap();
+        
+        // Line 2: dataset_location, id_lines_1-5 (all 0 for now)
+        self.writer.write_all(b"         1\n").unwrap();
+        
+        // Line 3: model_type, analysis_type, data_characteristic, result_type, data_type, num_data_values
+        let line3 = format!("{:10}{:10}{:10}{:10}{:10}{:10}\n", 1, analysis_type, 1, 0, data_type, num_data_values);
+        self.writer.write_all(line3.as_bytes()).unwrap();
+        
+        // Line 4-5: Design Set, Iteration Number, Solution Set, Boundary Condition, Load Set, Time/Freq Mode
+        self.writer.write_all(b"         0         0         0         0         0         0\n").unwrap();
+        self.writer.write_all(b"         0         0         0         0         0         0\n").unwrap();
+        
+        // Line 6: Creation Options, Number Of IDs Available For Identification
+        self.writer.write_all(b"         0         0\n").unwrap();
+    }
+
+    fn write_node_data(&mut self, node_id: i32, values: &[f32]) {
+        // Write node ID
+        let s = format!("{:10}\n", node_id);
+        self.writer.write_all(s.as_bytes()).unwrap();
+        
+        // Write data values (6 per line in scientific notation)
+        for chunk in values.chunks(6) {
+            for &val in chunk {
+                let s = format!("{:13.5E}", val);
+                self.writer.write_all(s.as_bytes()).unwrap();
+            }
+            self.writer.write_all(b"\n").unwrap();
+        }
+    }
+
+    fn flush(&mut self) {
+        self.writer.flush().unwrap();
+    }
+}
+
+// ****************************************
 // Helper function: resolve part ID for an element
 // Advances part_index at part boundaries and parses part ID from text
 // ****************************************
@@ -1169,22 +1267,384 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
     }
 }
 
+// ****************************************
+// convert an A-File to UNV format
+// ****************************************
+fn read_radioss_anim_unv<W: Write>(file_name: &str, writer: W) {
+    let input_file = File::open(file_name).unwrap_or_else(|_| {
+        eprintln!("Can't open input file {}", file_name);
+        process::exit(1);
+    });
+    let mut inf = BufReader::new(input_file);
+
+    let mut unv = UnvWriter::new(writer);
+
+    let magic = read_i32(&mut inf);
+
+    match magic {
+        FASTMAGI10 => {
+            let a_time = read_f32(&mut inf);
+            let _time_text = read_text(&mut inf, 81);
+            let _mod_anim_text = read_text(&mut inf, 81);
+            let _radioss_run_text = read_text(&mut inf, 81);
+
+            let flag_a = read_i32_vec(&mut inf, 10);
+
+            // ********************
+            // 2D GEOMETRY
+            // ********************
+            let nb_nodes = read_i32(&mut inf) as usize;
+            let nb_facets = read_i32(&mut inf) as usize;
+            let nb_parts = read_i32(&mut inf) as usize;
+            let nb_func = read_i32(&mut inf) as usize;
+            let nb_efunc = read_i32(&mut inf) as usize;
+            let nb_vect = read_i32(&mut inf) as usize;
+            let nb_tens = read_i32(&mut inf) as usize;
+            let nb_skew = read_i32(&mut inf) as usize;
+
+            if nb_skew > 0 {
+                let _skew_short = read_u16_vec(&mut inf, nb_skew * 6);
+            }
+
+            let coor_a = read_f32_vec(&mut inf, 3 * nb_nodes);
+            let nod_num_a = read_i32_vec(&mut inf, nb_nodes);
+
+            let mut connect_a: Vec<i32> = Vec::new();
+            let mut del_elt_a: Vec<u8> = Vec::new();
+            if nb_facets > 0 {
+                connect_a = read_i32_vec(&mut inf, nb_facets * 4);
+                del_elt_a = read_bytes(&mut inf, nb_facets);
+            }
+
+            let mut def_part_a: Vec<i32> = Vec::new();
+            let mut p_text_a: Vec<String> = Vec::new();
+            if nb_parts > 0 {
+                def_part_a = read_i32_vec(&mut inf, nb_parts);
+                p_text_a = (0..nb_parts)
+                    .map(|_| read_text(&mut inf, 50))
+                    .collect();
+            }
+
+            let _norm_short_a = read_u16_vec(&mut inf, 3 * nb_nodes);
+
+            let mut f_text_a: Vec<String> = Vec::new();
+            let mut func_a: Vec<f32> = Vec::new();
+            let mut efunc_a: Vec<f32> = Vec::new();
+            if nb_func + nb_efunc > 0 {
+                f_text_a = (0..nb_func + nb_efunc)
+                    .map(|_| read_text(&mut inf, 81))
+                    .collect();
+                if nb_func > 0 {
+                    func_a = read_f32_vec(&mut inf, nb_nodes * nb_func);
+                }
+                if nb_efunc > 0 {
+                    efunc_a = read_f32_vec(&mut inf, nb_facets * nb_efunc);
+                }
+            }
+
+            let mut v_text_a: Vec<String> = Vec::new();
+            if nb_vect > 0 {
+                v_text_a = (0..nb_vect)
+                    .map(|_| read_text(&mut inf, 81))
+                    .collect();
+            }
+            let vect_val_a = read_f32_vec(&mut inf, 3 * nb_nodes * nb_vect);
+
+            let mut t_text_a: Vec<String> = Vec::new();
+            let mut tens_val_a: Vec<f32> = Vec::new();
+            if nb_tens > 0 {
+                t_text_a = (0..nb_tens)
+                    .map(|_| read_text(&mut inf, 81))
+                    .collect();
+                tens_val_a = read_f32_vec(&mut inf, nb_facets * nb_tens * 3);
+            }
+
+            // ********************
+            // 1D GEOMETRY
+            // ********************
+            let mut nb_elts_1d: usize = 0;
+            let mut connect_1d: Vec<i32> = Vec::new();
+            let mut del_elt_1d: Vec<u8> = Vec::new();
+            let mut def_part_1d: Vec<i32> = Vec::new();
+            let mut p_text_1d: Vec<String> = Vec::new();
+            let mut f_text_1d: Vec<String> = Vec::new();
+            let mut efunc_1d: Vec<f32> = Vec::new();
+            let mut nb_efunc_1d: usize = 0;
+            let mut tors_val_1d: Vec<f32> = Vec::new();
+            let mut nb_tors_1d: usize = 0;
+
+            if flag_a[0] != 0 {
+                nb_elts_1d = read_i32(&mut inf) as usize;
+                let nb_parts_1d = read_i32(&mut inf) as usize;
+                nb_efunc_1d = read_i32(&mut inf) as usize;
+                nb_tors_1d = read_i32(&mut inf) as usize;
+                let _is_skew_1d = read_i32(&mut inf);
+
+                connect_1d = read_i32_vec(&mut inf, nb_elts_1d * 2);
+                del_elt_1d = read_bytes(&mut inf, nb_elts_1d);
+
+                def_part_1d = read_i32_vec(&mut inf, nb_parts_1d);
+                p_text_1d = (0..nb_parts_1d)
+                    .map(|_| read_text(&mut inf, 50))
+                    .collect();
+
+                if nb_efunc_1d > 0 {
+                    f_text_1d = (0..nb_efunc_1d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    efunc_1d = read_f32_vec(&mut inf, nb_elts_1d * nb_efunc_1d);
+                }
+
+                if nb_tors_1d > 0 {
+                    let _tors_text_1d: Vec<String> = (0..nb_tors_1d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    tors_val_1d = read_f32_vec(&mut inf, nb_elts_1d * nb_tors_1d * 9);
+                }
+            }
+
+            // ********************
+            // 3D GEOMETRY
+            // ********************
+            let mut nb_elts_3d: usize = 0;
+            let mut connect_3d: Vec<i32> = Vec::new();
+            let mut del_elt_3d: Vec<u8> = Vec::new();
+            let mut def_part_3d: Vec<i32> = Vec::new();
+            let mut p_text_3d: Vec<String> = Vec::new();
+            let mut f_text_3d: Vec<String> = Vec::new();
+            let mut efunc_3d: Vec<f32> = Vec::new();
+            let mut nb_efunc_3d: usize = 0;
+            let mut t_text_3d: Vec<String> = Vec::new();
+            let mut tens_val_3d: Vec<f32> = Vec::new();
+            let mut nb_tens_3d: usize = 0;
+
+            if flag_a[1] != 0 {
+                nb_elts_3d = read_i32(&mut inf) as usize;
+                let nb_parts_3d = read_i32(&mut inf) as usize;
+                nb_efunc_3d = read_i32(&mut inf) as usize;
+                nb_tens_3d = read_i32(&mut inf) as usize;
+
+                connect_3d = read_i32_vec(&mut inf, nb_elts_3d * 8);
+                del_elt_3d = read_bytes(&mut inf, nb_elts_3d);
+
+                def_part_3d = read_i32_vec(&mut inf, nb_parts_3d);
+                p_text_3d = (0..nb_parts_3d)
+                    .map(|_| read_text(&mut inf, 50))
+                    .collect();
+
+                if nb_efunc_3d > 0 {
+                    f_text_3d = (0..nb_efunc_3d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    efunc_3d = read_f32_vec(&mut inf, nb_elts_3d * nb_efunc_3d);
+                }
+
+                if nb_tens_3d > 0 {
+                    t_text_3d = (0..nb_tens_3d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    tens_val_3d = read_f32_vec(&mut inf, nb_elts_3d * nb_tens_3d * 6);
+                }
+            }
+
+            // ********************
+            // SPH GEOMETRY
+            // ********************
+            let mut nb_elts_sph: usize = 0;
+            let mut connect_sph: Vec<i32> = Vec::new();
+            let mut del_elt_sph: Vec<u8> = Vec::new();
+            let mut def_part_sph: Vec<i32> = Vec::new();
+            let mut p_text_sph: Vec<String> = Vec::new();
+            let mut f_text_sph: Vec<String> = Vec::new();
+            let mut efunc_sph: Vec<f32> = Vec::new();
+            let mut nb_efunc_sph: usize = 0;
+            let mut tens_text_sph: Vec<String> = Vec::new();
+            let mut tens_val_sph: Vec<f32> = Vec::new();
+            let mut nb_tens_sph: usize = 0;
+
+            if flag_a[7] != 0 {
+                nb_elts_sph = read_i32(&mut inf) as usize;
+                let nb_parts_sph = read_i32(&mut inf) as usize;
+                nb_efunc_sph = read_i32(&mut inf) as usize;
+                nb_tens_sph = read_i32(&mut inf) as usize;
+
+                connect_sph = read_i32_vec(&mut inf, nb_elts_sph);
+                del_elt_sph = read_bytes(&mut inf, nb_elts_sph);
+
+                def_part_sph = read_i32_vec(&mut inf, nb_parts_sph);
+                p_text_sph = (0..nb_parts_sph)
+                    .map(|_| read_text(&mut inf, 50))
+                    .collect();
+
+                if nb_efunc_sph > 0 {
+                    f_text_sph = (0..nb_efunc_sph)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    efunc_sph = read_f32_vec(&mut inf, nb_elts_sph * nb_efunc_sph);
+                }
+
+                if nb_tens_sph > 0 {
+                    tens_text_sph = (0..nb_tens_sph)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    tens_val_sph = read_f32_vec(&mut inf, nb_elts_sph * nb_tens_sph * 6);
+                }
+
+                if flag_a[4] != 0 {
+                    let _num_parent_sph = read_i32_vec(&mut inf, nb_parts_sph);
+                    let _mat_part_sph = read_i32_vec(&mut inf, nb_parts_sph);
+                    let _prop_part_sph = read_i32_vec(&mut inf, nb_parts_sph);
+                }
+            }
+
+            // ********************
+            // UNV output
+            // ********************
+            
+            // Dataset 2411: Nodes
+            unv.write_dataset_header(2411);
+            for inod in 0..nb_nodes {
+                unv.write_node(
+                    nod_num_a[inod],
+                    coor_a[3 * inod],
+                    coor_a[3 * inod + 1],
+                    coor_a[3 * inod + 2],
+                );
+            }
+            unv.write_dataset_footer();
+
+            // Dataset 2412: Elements
+            unv.write_dataset_header(2412);
+            
+            let mut elem_id = 1;
+            
+            // 1D elements (beams) - UNV element type 21 (linear beam)
+            for icon in 0..nb_elts_1d {
+                let nodes = [connect_1d[icon * 2], connect_1d[icon * 2 + 1]];
+                unv.write_element(elem_id, 21, &nodes);
+                elem_id += 1;
+            }
+            
+            // 2D elements (shells/quads) - UNV element type 94 (thin shell linear quadrilateral) or 91 (thin shell linear triangle)
+            for icon in 0..nb_facets {
+                let nodes_quad = [
+                    connect_a[icon * 4],
+                    connect_a[icon * 4 + 1],
+                    connect_a[icon * 4 + 2],
+                    connect_a[icon * 4 + 3],
+                ];
+                
+                // Check if it's actually a triangle (4th node == 3rd node)
+                if nodes_quad[2] == nodes_quad[3] {
+                    let nodes_tri = [nodes_quad[0], nodes_quad[1], nodes_quad[2]];
+                    unv.write_element(elem_id, 91, &nodes_tri);
+                } else {
+                    unv.write_element(elem_id, 94, &nodes_quad);
+                }
+                elem_id += 1;
+            }
+            
+            // 3D elements (solids) - UNV element type 115 (solid linear brick) or 111 (solid linear tetrahedron)
+            for icon in 0..nb_elts_3d {
+                let nodes_hex = [
+                    connect_3d[icon * 8],
+                    connect_3d[icon * 8 + 1],
+                    connect_3d[icon * 8 + 2],
+                    connect_3d[icon * 8 + 3],
+                    connect_3d[icon * 8 + 4],
+                    connect_3d[icon * 8 + 5],
+                    connect_3d[icon * 8 + 6],
+                    connect_3d[icon * 8 + 7],
+                ];
+                
+                // Check if it's a tetrahedron (last 4 nodes are duplicates of first 4)
+                let is_tet = unique_count(&nodes_hex) == 4;
+                
+                if is_tet {
+                    if let Some(tet_nodes) = unique_sorted_4(&nodes_hex) {
+                        unv.write_element(elem_id, 111, &tet_nodes);
+                    } else {
+                        unv.write_element(elem_id, 115, &nodes_hex);
+                    }
+                } else {
+                    unv.write_element(elem_id, 115, &nodes_hex);
+                }
+                elem_id += 1;
+            }
+            
+            // SPH elements - UNV element type 11 (rod/point element)
+            for icon in 0..nb_elts_sph {
+                let nodes = [connect_sph[icon]];
+                unv.write_element(elem_id, 11, &nodes);
+                elem_id += 1;
+            }
+            
+            unv.write_dataset_footer();
+
+            // Dataset 2414: Analysis Data (nodal scalars)
+            if nb_func > 0 {
+                for ifun in 0..nb_func {
+                    let name = replace_underscore(&f_text_a[ifun]);
+                    unv.write_dataset_header(2414);
+                    unv.write_analysis_data_header(2414, 1, 2, 1, &name);
+                    
+                    for inod in 0..nb_nodes {
+                        let value = func_a[ifun * nb_nodes + inod];
+                        unv.write_node_data(nod_num_a[inod], &[value]);
+                    }
+                    
+                    unv.write_dataset_footer();
+                }
+            }
+
+            // Dataset 2414: Analysis Data (nodal vectors)
+            if nb_vect > 0 {
+                for ivect in 0..nb_vect {
+                    let name = replace_underscore(&v_text_a[ivect]);
+                    unv.write_dataset_header(2414);
+                    unv.write_analysis_data_header(2414, 1, 2, 3, &name);
+                    
+                    for inod in 0..nb_nodes {
+                        let values = [
+                            vect_val_a[ivect * 3 * nb_nodes + inod * 3],
+                            vect_val_a[ivect * 3 * nb_nodes + inod * 3 + 1],
+                            vect_val_a[ivect * 3 * nb_nodes + inod * 3 + 2],
+                        ];
+                        unv.write_node_data(nod_num_a[inod], &values);
+                    }
+                    
+                    unv.write_dataset_footer();
+                }
+            }
+
+            unv.flush();
+        }
+
+        _ => {
+            eprintln!("Error in Anim Files version");
+            process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <filename1> [filename2 ...] [--binary]", args[0]);
-        eprintln!("  --binary : Output in binary VTK format (default is ASCII)");
-        eprintln!("  Output files will have .vtk extension added automatically");
+        eprintln!("Usage: {} <filename1> [filename2 ...] [--binary] [--unv]", args[0]);
+        eprintln!("  --binary : Output in binary VTK format (default is ASCII VTK)");
+        eprintln!("  --unv    : Output in UNV format instead of VTK");
+        eprintln!("  Output files will have .vtk or .unv extension added automatically");
         process::exit(1);
     }
     
-    // Check if --binary flag is present
+    // Check if --binary and --unv flags are present
     let binary_format = args.iter().any(|arg| arg == "--binary" || arg == "-b");
+    let unv_format = args.iter().any(|arg| arg == "--unv");
     
-    // Collect all input files (skip program name and --binary flag)
+    // Collect all input files (skip program name and flags)
     let input_files: Vec<&String> = args[1..]
         .iter()
-        .filter(|arg| *arg != "--binary" && *arg != "-b")
+        .filter(|arg| *arg != "--binary" && *arg != "-b" && *arg != "--unv")
         .collect();
     
     if input_files.is_empty() {
@@ -1197,8 +1657,12 @@ fn main() {
     let mut successful_files = 0;
     
     for file_name in input_files {
-        // Always append .vtk extension to create output filename
-        let output_file_name = format!("{}.vtk", file_name);
+        // Determine output file extension based on format
+        let (output_file_name, format_desc) = if unv_format {
+            (format!("{}.unv", file_name), "UNV")
+        } else {
+            (format!("{}.vtk", file_name), if binary_format { "binary VTK" } else { "ASCII VTK" })
+        };
         
         // Verify input file exists before creating output file
         if !std::path::Path::new(file_name.as_str()).exists() {
@@ -1216,8 +1680,13 @@ fn main() {
             }
         };
         
-        eprintln!("Converting {} to {}", file_name, output_file_name);
-        read_radioss_anim(file_name, binary_format, output_file);
+        eprintln!("Converting {} to {} ({})", file_name, output_file_name, format_desc);
+        
+        if unv_format {
+            read_radioss_anim_unv(file_name, output_file);
+        } else {
+            read_radioss_anim(file_name, binary_format, output_file);
+        }
         successful_files += 1;
     }
     
