@@ -25,63 +25,79 @@
 // To launch conversion:
 //   anim_to_vtk animationFile > vtkFile
 
-use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::process;
+
+use itoa::Buffer as ItoaBuffer;
+use ryu::Buffer as RyuBuffer;
 
 const FASTMAGI10: i32 = 0x542c;
 
 // ****************************************
 // read big-endian data from file
 // ****************************************
-fn read_i32(file: &mut File) -> i32 {
+fn read_i32<R: Read>(reader: &mut R) -> i32 {
     let mut buf = [0u8; 4];
-    file.read_exact(&mut buf).expect("Error in reading file");
+    reader.read_exact(&mut buf).expect("Error in reading file");
     i32::from_be_bytes(buf)
 }
 
-fn read_f32(file: &mut File) -> f32 {
+fn read_f32<R: Read>(reader: &mut R) -> f32 {
     let mut buf = [0u8; 4];
-    file.read_exact(&mut buf).expect("Error in reading file");
+    reader.read_exact(&mut buf).expect("Error in reading file");
     f32::from_be_bytes(buf)
 }
 
-fn read_i32_vec(file: &mut File, count: usize) -> Vec<i32> {
+fn read_i32_vec<R: Read>(reader: &mut R, count: usize) -> Vec<i32> {
+    let mut bytes = vec![0u8; count * 4];
+    reader
+        .read_exact(&mut bytes)
+        .expect("Error in reading file");
     let mut result = Vec::with_capacity(count);
-    for _ in 0..count {
-        result.push(read_i32(file));
+    for chunk in bytes.chunks_exact(4) {
+        result.push(i32::from_be_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3],
+        ]));
     }
     result
 }
 
-fn read_f32_vec(file: &mut File, count: usize) -> Vec<f32> {
+fn read_f32_vec<R: Read>(reader: &mut R, count: usize) -> Vec<f32> {
+    let mut bytes = vec![0u8; count * 4];
+    reader
+        .read_exact(&mut bytes)
+        .expect("Error in reading file");
     let mut result = Vec::with_capacity(count);
-    for _ in 0..count {
-        result.push(read_f32(file));
+    for chunk in bytes.chunks_exact(4) {
+        result.push(f32::from_be_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3],
+        ]));
     }
     result
 }
 
-fn read_u16_vec(file: &mut File, count: usize) -> Vec<u16> {
+fn read_u16_vec<R: Read>(reader: &mut R, count: usize) -> Vec<u16> {
+    let mut bytes = vec![0u8; count * 2];
+    reader
+        .read_exact(&mut bytes)
+        .expect("Error in reading file");
     let mut result = Vec::with_capacity(count);
-    let mut buf = [0u8; 2];
-    for _ in 0..count {
-        file.read_exact(&mut buf).expect("Error in reading file");
-        result.push(u16::from_be_bytes(buf));
+    for chunk in bytes.chunks_exact(2) {
+        result.push(u16::from_be_bytes([chunk[0], chunk[1]]));
     }
     result
 }
 
-fn read_bytes(file: &mut File, count: usize) -> Vec<u8> {
+fn read_bytes<R: Read>(reader: &mut R, count: usize) -> Vec<u8> {
     let mut buf = vec![0u8; count];
-    file.read_exact(&mut buf).expect("Error in reading file");
+    reader.read_exact(&mut buf).expect("Error in reading file");
     buf
 }
 
-fn read_text(file: &mut File, count: usize) -> String {
-    let buf = read_bytes(file, count);
+fn read_text<R: Read>(reader: &mut R, count: usize) -> String {
+    let buf = read_bytes(reader, count);
     let s = std::str::from_utf8(&buf).unwrap_or("");
     s.trim_end_matches('\0').to_string()
 }
@@ -99,6 +115,9 @@ fn replace_underscore(s: &str) -> String {
 struct VtkWriter<W: Write> {
     writer: BufWriter<W>,
     binary: bool,
+    scratch: Vec<u8>,
+    itoa_buf: ItoaBuffer,
+    ryu_buf: RyuBuffer,
 }
 
 impl<W: Write> VtkWriter<W> {
@@ -106,6 +125,9 @@ impl<W: Write> VtkWriter<W> {
         VtkWriter {
             writer: BufWriter::new(writer),
             binary,
+            scratch: Vec::with_capacity(256),
+            itoa_buf: ItoaBuffer::new(),
+            ryu_buf: RyuBuffer::new(),
         }
     }
 
@@ -113,7 +135,11 @@ impl<W: Write> VtkWriter<W> {
         if self.binary {
             self.writer.write_all(&val.to_be_bytes()).unwrap();
         } else {
-            writeln!(self.writer, "{}", val).unwrap();
+            self.scratch.clear();
+            let s = self.itoa_buf.format(val);
+            self.scratch.extend_from_slice(s.as_bytes());
+            self.scratch.push(b'\n');
+            self.writer.write_all(&self.scratch).unwrap();
         }
     }
 
@@ -121,7 +147,11 @@ impl<W: Write> VtkWriter<W> {
         if self.binary {
             self.writer.write_all(&val.to_be_bytes()).unwrap();
         } else {
-            writeln!(self.writer, "{}", val).unwrap();
+            self.scratch.clear();
+            let s = self.ryu_buf.format(val);
+            self.scratch.extend_from_slice(s.as_bytes());
+            self.scratch.push(b'\n');
+            self.writer.write_all(&self.scratch).unwrap();
         }
     }
 
@@ -129,7 +159,11 @@ impl<W: Write> VtkWriter<W> {
         if self.binary {
             self.writer.write_all(&val.to_be_bytes()).unwrap();
         } else {
-            writeln!(self.writer, "{}", val).unwrap();
+            self.scratch.clear();
+            let s = self.ryu_buf.format(val);
+            self.scratch.extend_from_slice(s.as_bytes());
+            self.scratch.push(b'\n');
+            self.writer.write_all(&self.scratch).unwrap();
         }
     }
 
@@ -139,7 +173,17 @@ impl<W: Write> VtkWriter<W> {
             self.writer.write_all(&b.to_be_bytes()).unwrap();
             self.writer.write_all(&c.to_be_bytes()).unwrap();
         } else {
-            writeln!(self.writer, "{} {} {}", a, b, c).unwrap();
+            self.scratch.clear();
+            let sa = self.ryu_buf.format(a);
+            self.scratch.extend_from_slice(sa.as_bytes());
+            self.scratch.push(b' ');
+            let sb = self.ryu_buf.format(b);
+            self.scratch.extend_from_slice(sb.as_bytes());
+            self.scratch.push(b' ');
+            let sc = self.ryu_buf.format(c);
+            self.scratch.extend_from_slice(sc.as_bytes());
+            self.scratch.push(b'\n');
+            self.writer.write_all(&self.scratch).unwrap();
         }
     }
 
@@ -151,7 +195,7 @@ impl<W: Write> VtkWriter<W> {
             }
         } else {
             for _ in 0..count {
-                writeln!(self.writer, "0").unwrap();
+                self.writer.write_all(b"0\n").unwrap();
             }
         }
     }
@@ -161,19 +205,82 @@ impl<W: Write> VtkWriter<W> {
     }
 
     fn write_header(&mut self, text: &str) {
-        writeln!(self.writer, "{}", text).unwrap();
+        self.writer.write_all(text.as_bytes()).unwrap();
+        self.writer.write_all(b"\n").unwrap();
     }
 
     fn newline(&mut self) {
-        writeln!(self.writer).unwrap();
+        self.writer.write_all(b"\n").unwrap();
     }
 
     fn flush(&mut self) {
         self.writer.flush().unwrap();
     }
 
-    fn writer(&mut self) -> &mut BufWriter<W> {
-        &mut self.writer
+    fn write_i32_line(&mut self, values: &[i32]) {
+        if self.binary {
+            for &v in values {
+                self.writer.write_all(&v.to_be_bytes()).unwrap();
+            }
+        } else {
+            self.scratch.clear();
+            for (i, &v) in values.iter().enumerate() {
+                if i > 0 {
+                    self.scratch.push(b' ');
+                }
+                let s = self.itoa_buf.format(v);
+                self.scratch.extend_from_slice(s.as_bytes());
+            }
+            self.scratch.push(b'\n');
+            self.writer.write_all(&self.scratch).unwrap();
+        }
+    }
+}
+
+// ****************************************
+// Small fixed-size dedup helpers
+// ****************************************
+fn unique_count(nodes: &[i32]) -> usize {
+    let mut uniq = [0i32; 8];
+    let mut count = 0usize;
+    for &n in nodes {
+        let mut seen = false;
+        for i in 0..count {
+            if uniq[i] == n {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            uniq[count] = n;
+            count += 1;
+        }
+    }
+    count
+}
+
+fn unique_sorted_4(nodes: &[i32]) -> Option<[i32; 4]> {
+    let mut uniq = [0i32; 8];
+    let mut count = 0usize;
+    for &n in nodes {
+        let mut seen = false;
+        for i in 0..count {
+            if uniq[i] == n {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            uniq[count] = n;
+            count += 1;
+        }
+    }
+    if count == 4 {
+        let mut arr = [uniq[0], uniq[1], uniq[2], uniq[3]];
+        arr.sort_unstable();
+        Some(arr)
+    } else {
+        None
     }
 }
 
@@ -310,10 +417,11 @@ fn write_symmetric_tensor_3<W: Write>(
 // convert an A-File to vtk format (ASCII or BINARY)
 // ****************************************
 fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) {
-    let mut inf = File::open(file_name).unwrap_or_else(|_| {
+    let input_file = File::open(file_name).unwrap_or_else(|_| {
         eprintln!("Can't open input file {}", file_name);
         process::exit(1);
     });
+    let mut inf = BufReader::new(input_file);
 
     let mut vtk = VtkWriter::new(writer, binary_format);
 
@@ -476,7 +584,6 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
             // 1D GEOMETRY
             // ********************
             let mut nb_elts_1d: usize = 0;
-            let mut nb_parts_1d: usize = 0;
             let mut nb_efunc_1d: usize = 0;
             let mut nb_tors_1d: usize = 0;
             let mut connect_1d: Vec<i32> = Vec::new();
@@ -491,7 +598,7 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
 
             if flag_a[3] != 0 {
                 nb_elts_1d = read_i32(&mut inf) as usize;
-                nb_parts_1d = read_i32(&mut inf) as usize;
+                let nb_parts_1d = read_i32(&mut inf) as usize;
                 nb_efunc_1d = read_i32(&mut inf) as usize;
                 nb_tors_1d = read_i32(&mut inf) as usize;
                 let is_skew_1d = read_i32(&mut inf);
@@ -686,30 +793,27 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
             vtk.newline();
 
             // detect tetrahedra in 3D cells
-            let mut is_3d_cell_tetrahedron: Vec<bool> = Vec::new();
+            let mut is_3d_cell_tetrahedron: Vec<bool> = Vec::with_capacity(nb_elts_3d);
+            let mut tetra_nodes: Vec<[i32; 4]> = Vec::with_capacity(nb_elts_3d);
             let mut tetrahedron_count: usize = 0;
             for icon in 0..nb_elts_3d {
-                let mut nodes = BTreeSet::new();
-                for i in 0..8 {
-                    nodes.insert(connect_3d[icon * 8 + i]);
-                }
-                if nodes.len() == 4 {
+                let nodes = &connect_3d[icon * 8..icon * 8 + 8];
+                if let Some(tet) = unique_sorted_4(nodes) {
                     is_3d_cell_tetrahedron.push(true);
+                    tetra_nodes.push(tet);
                     tetrahedron_count += 1;
                 } else {
                     is_3d_cell_tetrahedron.push(false);
+                    tetra_nodes.push([0; 4]);
                 }
             }
 
             // detect triangles in 2D cells
-            let mut is_2d_triangle: Vec<bool> = Vec::new();
+            let mut is_2d_triangle: Vec<bool> = Vec::with_capacity(nb_facets);
             let mut _triangle_count: usize = 0;
             for icon in 0..nb_facets {
-                let mut nodes = BTreeSet::new();
-                for i in 0..4 {
-                    nodes.insert(connect_a[icon * 4 + i]);
-                }
-                if nodes.len() == 3 {
+                let nodes = &connect_a[icon * 4..icon * 4 + 4];
+                if unique_count(nodes) == 3 {
                     is_2d_triangle.push(true);
                     _triangle_count += 1;
                 } else {
@@ -744,14 +848,12 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
                     // 3D elements
                     for icon in 0..nb_elts_3d {
                         if is_3d_cell_tetrahedron[icon] {
-                            let mut nodes = BTreeSet::new();
-                            for i in 0..8 {
-                                nodes.insert(connect_3d[icon * 8 + i]);
-                            }
+                            let tet = tetra_nodes[icon];
                             vtk.write_i32(4);
-                            for n in &nodes {
-                                vtk.write_i32(*n);
-                            }
+                            vtk.write_i32(tet[0]);
+                            vtk.write_i32(tet[1]);
+                            vtk.write_i32(tet[2]);
+                            vtk.write_i32(tet[3]);
                         } else {
                             vtk.write_i32(8);
                             for i in 0..8 {
@@ -765,47 +867,35 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
                         vtk.write_i32(connec_sph[icon]);
                     }
                 } else {
-                    // Note: Direct writer access needed here for specialized ASCII formatting
-                    // (e.g., double spaces in hex output, write!/writeln! combinations for triangles)
-                    let out = vtk.writer();
                     // 1D elements
                     for icon in 0..nb_elts_1d {
-                        writeln!(
-                            out,
-                            "2 {} {}",
+                        let vals = [
+                            2,
                             connect_1d[icon * 2],
-                            connect_1d[icon * 2 + 1]
-                        )
-                        .unwrap();
+                            connect_1d[icon * 2 + 1],
+                        ];
+                        vtk.write_i32_line(&vals);
                     }
                     // 2D elements
                     for icon in 0..nb_facets {
-                        writeln!(
-                            out,
-                            "4 {} {} {} {}",
+                        let vals = [
+                            4,
                             connect_a[icon * 4],
                             connect_a[icon * 4 + 1],
                             connect_a[icon * 4 + 2],
-                            connect_a[icon * 4 + 3]
-                        )
-                        .unwrap();
+                            connect_a[icon * 4 + 3],
+                        ];
+                        vtk.write_i32_line(&vals);
                     }
                     // 3D elements
                     for icon in 0..nb_elts_3d {
                         if is_3d_cell_tetrahedron[icon] {
-                            let mut nodes = BTreeSet::new();
-                            for i in 0..8 {
-                                nodes.insert(connect_3d[icon * 8 + i]);
-                            }
-                            write!(out, "4").unwrap();
-                            for n in &nodes {
-                                write!(out, " {}", n).unwrap();
-                            }
-                            writeln!(out).unwrap();
+                            let tet = tetra_nodes[icon];
+                            let vals = [4, tet[0], tet[1], tet[2], tet[3]];
+                            vtk.write_i32_line(&vals);
                         } else {
-                            writeln!(
-                                out,
-                                "8 {}  {}  {}  {}  {}  {}  {}  {}",
+                            let vals = [
+                                8,
                                 connect_3d[icon * 8],
                                 connect_3d[icon * 8 + 1],
                                 connect_3d[icon * 8 + 2],
@@ -813,14 +903,15 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
                                 connect_3d[icon * 8 + 4],
                                 connect_3d[icon * 8 + 5],
                                 connect_3d[icon * 8 + 6],
-                                connect_3d[icon * 8 + 7]
-                            )
-                            .unwrap();
+                                connect_3d[icon * 8 + 7],
+                            ];
+                            vtk.write_i32_line(&vals);
                         }
                     }
                     // SPH elements
                     for icon in 0..nb_elts_sph {
-                        writeln!(out, "1 {}", connec_sph[icon]).unwrap();
+                        let vals = [1, connec_sph[icon]];
+                        vtk.write_i32_line(&vals);
                     }
                 }
             }
