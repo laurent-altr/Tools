@@ -1307,13 +1307,12 @@ fn read_radioss_anim_unv<W: Write>(file_name: &str, writer: W) {
             }
 
             let coor_a = read_f32_vec(&mut inf, 3 * nb_nodes);
-            let nod_num_a = read_i32_vec(&mut inf, nb_nodes);
 
             let mut connect_a: Vec<i32> = Vec::new();
-            let mut del_elt_a: Vec<u8> = Vec::new();
+            let mut _del_elt_a: Vec<u8> = Vec::new();
             if nb_facets > 0 {
                 connect_a = read_i32_vec(&mut inf, nb_facets * 4);
-                del_elt_a = read_bytes(&mut inf, nb_facets);
+                _del_elt_a = read_bytes(&mut inf, nb_facets);
             }
 
             let mut def_part_a: Vec<i32> = Vec::new();
@@ -1357,6 +1356,26 @@ fn read_radioss_anim_unv<W: Write>(file_name: &str, writer: W) {
                     .map(|_| read_text(&mut inf, 81))
                     .collect();
                 tens_val_a = read_f32_vec(&mut inf, nb_facets * nb_tens * 3);
+            }
+
+            if flag_a[0] == 1 {
+                let _e_mass_a = read_f32_vec(&mut inf, nb_facets);
+                let _n_mass_a = read_f32_vec(&mut inf, nb_nodes);
+            }
+
+            let mut nod_num_a: Vec<i32> = Vec::new();
+            if flag_a[1] != 0 {
+                nod_num_a = read_i32_vec(&mut inf, nb_nodes);
+                let _el_num_a = read_i32_vec(&mut inf, nb_facets);
+            } else {
+                // If node IDs are not in the file, generate sequential IDs
+                nod_num_a = (0..nb_nodes as i32).collect();
+            }
+
+            if flag_a[4] != 0 {
+                let _part2subset_2d = read_i32_vec(&mut inf, nb_parts);
+                let _part_material_2d = read_i32_vec(&mut inf, nb_parts);
+                let _part_properties_2d = read_i32_vec(&mut inf, nb_parts);
             }
 
             // ********************
