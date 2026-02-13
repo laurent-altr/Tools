@@ -1262,6 +1262,8 @@ fn main() {
     
     // Only calculate thread count if we have valid file sizes
     let thread_count = if file_sizes.is_empty() {
+        eprintln!("Warning: Could not determine file sizes for any input files");
+        eprintln!("         Proceeding with sequential processing");
         1  // Fall back to single thread if no file sizes available
     } else {
         calculate_thread_count(&file_sizes)
@@ -1277,7 +1279,7 @@ fn main() {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
-        .expect("Failed to build thread pool");
+        .unwrap_or_else(|e| panic!("Failed to build thread pool with {} threads: {}", thread_count, e));
     
     // Process files in parallel using the custom pool
     pool.install(|| {
@@ -1308,8 +1310,14 @@ fn main() {
     });
     
     // Extract results from Arc<Mutex<>>
-    let failed_files = Arc::try_unwrap(failed_files).unwrap().into_inner().unwrap();
-    let successful_files = Arc::try_unwrap(successful_files).unwrap().into_inner().unwrap();
+    let failed_files = Arc::try_unwrap(failed_files)
+        .expect("Failed to extract failed files list")
+        .into_inner()
+        .expect("Failed to acquire lock on failed files list");
+    let successful_files = Arc::try_unwrap(successful_files)
+        .expect("Failed to extract success count")
+        .into_inner()
+        .expect("Failed to acquire lock on success count");
     
     // Report results
     if !failed_files.is_empty() {
