@@ -40,6 +40,7 @@ const FASTMAGI10: i32 = 0x542c;
 // ****************************************
 
 fn format_f32_like_cpp(v: f32) -> String {
+    // Check boundary at f32 precision to avoid precision loss when casting to f64
     format_float_impl(v as f64, v.abs() < 1e-4f32 || v.abs() >= 1e6f32)
 }
 
@@ -49,6 +50,7 @@ fn format_f64_like_cpp(v: f64) -> String {
 
 // Common implementation for formatting
 fn format_float_impl(v: f64, use_scientific: bool) -> String {
+    // Note: This comparison is true for both +0.0 and -0.0 per IEEE 754
     if v == 0.0 {
         return "0".to_string();
     }
@@ -71,7 +73,8 @@ fn format_float_impl(v: f64, use_scientific: bool) -> String {
         // Calculate significant figures needed for 6 total significant digits
         let abs_v = v.abs();
         let log = abs_v.log10().floor();
-        let decimals = (5.0 - log).max(0.0) as usize;
+        // Cap decimals to prevent overflow and excessive precision
+        let decimals = ((5.0 - log).max(0.0) as usize).min(20);
         let formatted = format!("{:.prec$}", v, prec = decimals);
         
         // Remove trailing zeros after decimal point
