@@ -38,15 +38,22 @@ const FASTMAGI10: i32 = 0x542c;
 // Format floats/doubles to match C++ cout behavior
 // C++ cout uses 6 significant digits by default
 // ****************************************
+
 fn format_f32_like_cpp(v: f32) -> String {
+    format_float_impl(v as f64, v.abs() < 1e-4f32 || v.abs() >= 1e6f32)
+}
+
+fn format_f64_like_cpp(v: f64) -> String {
+    format_float_impl(v, v.abs() < 1e-4 || v.abs() >= 1e6)
+}
+
+// Common implementation for formatting
+fn format_float_impl(v: f64, use_scientific: bool) -> String {
     if v == 0.0 {
         return "0".to_string();
     }
     
-    let abs_v = v.abs();
-    
-    // Use scientific notation for very large or very small numbers
-    if abs_v < 1e-4 || abs_v >= 1e6 {
+    if use_scientific {
         let s = format!("{:.5e}", v);
         
         // Clean up exponential notation to match C++ format
@@ -54,13 +61,15 @@ fn format_f32_like_cpp(v: f32) -> String {
             let (mantissa, exp_part) = s.split_at(e_pos);
             let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
             let exp_str = &exp_part[1..];
-            let exp_val: i32 = exp_str.parse().unwrap();
+            // Parse exponent - should always succeed for valid format! output
+            let exp_val: i32 = exp_str.parse().expect("Invalid exponential notation from format!");
             format!("{}e{:+03}", mantissa, exp_val)
         } else {
             s
         }
     } else {
         // Calculate significant figures needed for 6 total significant digits
+        let abs_v = v.abs();
         let log = abs_v.log10().floor();
         let decimals = (5.0 - log).max(0.0) as usize;
         let formatted = format!("{:.prec$}", v, prec = decimals);
@@ -74,41 +83,54 @@ fn format_f32_like_cpp(v: f32) -> String {
     }
 }
 
-fn format_f64_like_cpp(v: f64) -> String {
-    if v == 0.0 {
-        return "0".to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_f32_zero() {
+        assert_eq!(format_f32_like_cpp(0.0), "0");
+        assert_eq!(format_f32_like_cpp(-0.0), "0");
     }
-    
-    let abs_v = v.abs();
-    
-    // Use scientific notation for very large or very small numbers
-    if abs_v < 1e-4 || abs_v >= 1e6 {
-        let s = format!("{:.5e}", v);
-        
-        // Clean up exponential notation to match C++ format
-        if let Some(e_pos) = s.find('e') {
-            let (mantissa, exp_part) = s.split_at(e_pos);
-            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
-            let exp_str = &exp_part[1..];
-            let exp_val: i32 = exp_str.parse().unwrap();
-            format!("{}e{:+03}", mantissa, exp_val)
-        } else {
-            s
-        }
-    } else {
-        // Calculate significant figures needed for 6 total significant digits
-        let log = abs_v.log10().floor();
-        let decimals = (5.0 - log).max(0.0) as usize;
-        let formatted = format!("{:.prec$}", v, prec = decimals);
-        
-        // Remove trailing zeros after decimal point
-        if formatted.contains('.') {
-            formatted.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            formatted
-        }
+
+    #[test]
+    fn test_format_f32_simple() {
+        assert_eq!(format_f32_like_cpp(1.0), "1");
+        assert_eq!(format_f32_like_cpp(1.5), "1.5");
+        assert_eq!(format_f32_like_cpp(-2.5), "-2.5");
+    }
+
+    #[test]
+    fn test_format_f32_significant_digits() {
+        assert_eq!(format_f32_like_cpp(0.123456789), "0.123457");
+        assert_eq!(format_f32_like_cpp(1.234567890), "1.23457");
+        assert_eq!(format_f32_like_cpp(123.456789), "123.457");
+    }
+
+    #[test]
+    fn test_format_f32_scientific_small() {
+        assert_eq!(format_f32_like_cpp(0.00001), "1e-05");
+        assert_eq!(format_f32_like_cpp(1e-10), "1e-10");
+    }
+
+    #[test]
+    fn test_format_f32_scientific_large() {
+        assert_eq!(format_f32_like_cpp(1000000.0), "1e+06");
+        assert_eq!(format_f32_like_cpp(1.23456789e8), "1.23457e+08");
+    }
+
+    #[test]
+    fn test_format_f32_boundary() {
+        assert_eq!(format_f32_like_cpp(0.0001), "0.0001");
+        assert_eq!(format_f32_like_cpp(0.000123456789), "0.000123457");
+    }
+
+    #[test]
+    fn test_format_f64_simple() {
+        assert_eq!(format_f64_like_cpp(1.234567890123456789), "1.23457");
     }
 }
+
 
 // ****************************************
 // read big-endian data from file
