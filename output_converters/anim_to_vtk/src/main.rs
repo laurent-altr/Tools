@@ -26,12 +26,15 @@
 //   anim_to_vtk animationFile > vtkFile
 
 use std::env;
-use std::fs::File;
+use std::fs::{File, metadata};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::process;
+use std::sync::{Arc, Mutex};
 
 use itoa::Buffer as ItoaBuffer;
+use rayon::prelude::*;
 use ryu::Buffer as RyuBuffer;
+use sysinfo::System;
 
 const FASTMAGI10: i32 = 0x542c;
 
@@ -1169,6 +1172,59 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
     }
 }
 
+/// Calculate optimal number of threads based on available memory and file sizes
+/// Returns the number of threads to use for parallel processing
+fn calculate_thread_count(file_sizes: &[u64]) -> usize {
+    if file_sizes.is_empty() {
+        return 1;
+    }
+    
+    // Get available system memory
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+    let available_memory = sys.available_memory(); // in bytes
+    
+    // Calculate total and average file sizes
+    let total_size: u64 = file_sizes.iter().sum();
+    let max_size = *file_sizes.iter().max().unwrap_or(&0);
+    
+    // Estimate memory usage per file processing:
+    // - Input file is read into memory (approximately file_size)
+    // - During processing, additional memory for data structures (estimate ~3x file size)
+    // - Output file generation (estimate ~2x file size for VTK format)
+    // Total estimate: ~6x file size per concurrent file
+    let estimated_memory_per_file = max_size * 6;
+    
+    // Calculate how many files we can safely process in parallel
+    // Use 80% of available memory as a safety margin
+    let safe_memory = (available_memory as f64 * 0.8) as u64;
+    let max_parallel = if estimated_memory_per_file > 0 {
+        (safe_memory / estimated_memory_per_file).max(1) as usize
+    } else {
+        1
+    };
+    
+    // Also consider CPU count
+    let cpu_count = rayon::current_num_threads();
+    
+    // Use the minimum of:
+    // 1. Memory-based limit
+    // 2. Number of CPU threads
+    // 3. Number of files to process
+    let optimal_threads = max_parallel.min(cpu_count).min(file_sizes.len());
+    
+    eprintln!("Memory analysis:");
+    eprintln!("  Available memory: {:.2} GB", available_memory as f64 / (1024.0 * 1024.0 * 1024.0));
+    eprintln!("  Total file size: {:.2} MB", total_size as f64 / (1024.0 * 1024.0));
+    eprintln!("  Largest file: {:.2} MB", max_size as f64 / (1024.0 * 1024.0));
+    eprintln!("  Estimated memory per file: {:.2} MB", estimated_memory_per_file as f64 / (1024.0 * 1024.0));
+    eprintln!("  CPU threads: {}", cpu_count);
+    eprintln!("  Memory-based limit: {} files", max_parallel);
+    eprintln!("  Using {} parallel threads for {} files", optimal_threads, file_sizes.len());
+    
+    optimal_threads
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -1182,9 +1238,10 @@ fn main() {
     let binary_format = args.iter().any(|arg| arg == "--binary" || arg == "-b");
     
     // Collect all input files (skip program name and --binary flag)
-    let input_files: Vec<&String> = args[1..]
+    let input_files: Vec<String> = args[1..]
         .iter()
         .filter(|arg| *arg != "--binary" && *arg != "-b")
+        .map(|s| s.clone())
         .collect();
     
     if input_files.is_empty() {
@@ -1192,34 +1249,65 @@ fn main() {
         process::exit(1);
     }
     
-    // Process each input file
-    let mut failed_files = Vec::new();
-    let mut successful_files = 0;
+    // Get file sizes for all input files that exist
+    let file_sizes: Vec<u64> = input_files
+        .iter()
+        .filter_map(|file_name| {
+            match metadata(file_name) {
+                Ok(meta) => Some(meta.len()),
+                Err(_) => None  // Will be handled later when processing
+            }
+        })
+        .collect();
     
-    for file_name in input_files {
+    // Only calculate thread count if we have valid file sizes
+    let thread_count = if file_sizes.is_empty() {
+        1  // Fall back to single thread if no file sizes available
+    } else {
+        calculate_thread_count(&file_sizes)
+    };
+    
+    // Configure Rayon thread pool with calculated thread count
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build_global()
+        .unwrap();
+    
+    eprintln!();
+    
+    // Use Arc<Mutex<>> for thread-safe counters
+    let failed_files = Arc::new(Mutex::new(Vec::new()));
+    let successful_files = Arc::new(Mutex::new(0));
+    
+    // Process files in parallel
+    input_files.par_iter().for_each(|file_name| {
         // Always append .vtk extension to create output filename
         let output_file_name = format!("{}.vtk", file_name);
         
         // Verify input file exists before creating output file
         if !std::path::Path::new(file_name.as_str()).exists() {
             eprintln!("Error: Input file {} does not exist", file_name);
-            failed_files.push(file_name.clone());
-            continue;
+            failed_files.lock().unwrap().push(file_name.clone());
+            return;
         }
         
         let output_file = match File::create(&output_file_name) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Error: Can't create output file {}: {}", output_file_name, e);
-                failed_files.push(file_name.clone());
-                continue;
+                failed_files.lock().unwrap().push(file_name.clone());
+                return;
             }
         };
         
         eprintln!("Converting {} to {}", file_name, output_file_name);
         read_radioss_anim(file_name, binary_format, output_file);
-        successful_files += 1;
-    }
+        *successful_files.lock().unwrap() += 1;
+    });
+    
+    // Extract results from Arc<Mutex<>>
+    let failed_files = Arc::try_unwrap(failed_files).unwrap().into_inner().unwrap();
+    let successful_files = Arc::try_unwrap(successful_files).unwrap().into_inner().unwrap();
     
     // Report results
     if !failed_files.is_empty() {
