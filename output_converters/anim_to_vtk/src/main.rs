@@ -1368,8 +1368,8 @@ fn read_radioss_anim_unv<W: Write>(file_name: &str, writer: W) {
                 nod_num_a = read_i32_vec(&mut inf, nb_nodes);
                 let _el_num_a = read_i32_vec(&mut inf, nb_facets);
             } else {
-                // If node IDs are not in the file, generate sequential IDs
-                nod_num_a = (0..nb_nodes as i32).collect();
+                // If node IDs are not in the file, generate sequential IDs starting from 1 (UNV convention)
+                nod_num_a = (1..=nb_nodes as i32).collect();
             }
 
             if flag_a[4] != 0 {

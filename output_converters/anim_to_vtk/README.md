@@ -101,7 +101,7 @@ In Paraview, the vtk files are bundled and can be loaded in one step.
 
 To generate UNV format output:
 
-        ./anim_to_vtk_linux64_gf [Deck Rootname]A001 --unv
+        ./anim_to_vtk [Deck Rootname]A001 --unv
 
 This creates `[Deck Rootname]A001.unv`
 
