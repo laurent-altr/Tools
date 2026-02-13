@@ -269,18 +269,12 @@ impl<W: Write> VtkWriter<W> {
 // ****************************************
 struct UnvWriter<W: Write> {
     writer: BufWriter<W>,
-    itoa_buf: ItoaBuffer,
-    ryu_buf: RyuBuffer,
-    scratch: Vec<u8>,
 }
 
 impl<W: Write> UnvWriter<W> {
     fn new(writer: W) -> Self {
         UnvWriter {
             writer: BufWriter::new(writer),
-            itoa_buf: ItoaBuffer::new(),
-            ryu_buf: RyuBuffer::new(),
-            scratch: Vec::with_capacity(256),
         }
     }
 

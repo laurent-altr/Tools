@@ -27,8 +27,8 @@ OpenRadioss GUI is a graphical launcher for OpenRadioss
 
 ## Output converter
 
-* anim_to_csv : converts OpenRadioss animation files to csv format.
-* th_to_nms   : converts OpenRadioss time history files to nms format.
+* anim_to_vtk : converts OpenRadioss animation files to VTK or UNV format.
+* th_to_csv   : converts OpenRadioss time history files to csv format.
 
 [https://github.com/OpenRadioss/tools/tree/main/output_converters](https://github.com/OpenRadioss/tools/tree/main/output_converters)
 
