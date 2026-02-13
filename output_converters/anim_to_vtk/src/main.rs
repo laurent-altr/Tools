@@ -1461,12 +1461,28 @@ fn read_radioss_anim_unv<W: Write>(file_name: &str, writer: W) {
             let mut elem_id_offset = nb_elts_1d as i32;
             for i in 0..nb_facets {
                 let elem_id = elem_id_offset + (i + 1) as i32;
-                let nodes = vec![
-                    connect_a[i * 4],
-                    connect_a[i * 4 + 1],
-                    connect_a[i * 4 + 2],
-                    connect_a[i * 4 + 3],
-                ];
+                let n1 = connect_a[i * 4];
+                let n2 = connect_a[i * 4 + 1];
+                let n3 = connect_a[i * 4 + 2];
+                let n4 = connect_a[i * 4 + 3];
+                
+                // Check if this is a triangle (degenerate quad with repeated node)
+                // Count unique nodes
+                let unique_node_count = unique_count(&[n1, n2, n3, n4]);
+                
+                let nodes = if unique_node_count == 3 {
+                    // It's a triangle - only include unique nodes
+                    let mut unique_nodes = Vec::new();
+                    if !unique_nodes.contains(&n1) { unique_nodes.push(n1); }
+                    if !unique_nodes.contains(&n2) { unique_nodes.push(n2); }
+                    if !unique_nodes.contains(&n3) { unique_nodes.push(n3); }
+                    if !unique_nodes.contains(&n4) && unique_nodes.len() < 3 { unique_nodes.push(n4); }
+                    unique_nodes
+                } else {
+                    // It's a quad - include all nodes
+                    vec![n1, n2, n3, n4]
+                };
+                
                 elem_2d.push((elem_id, nodes));
             }
 
@@ -1513,6 +1529,13 @@ fn main() {
     // Check for format flags
     let has_unv_flag = args.iter().any(|arg| arg == "--unv");
     let has_binary_flag = args.iter().any(|arg| arg == "--binary" || arg == "-b");
+    
+    // Validate that only one format flag is specified
+    if has_unv_flag && has_binary_flag {
+        eprintln!("Error: Cannot specify both --unv and --binary flags");
+        eprintln!("Please choose only one output format");
+        process::exit(1);
+    }
     
     // Determine output format
     let output_format = if has_unv_flag {
