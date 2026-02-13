@@ -95,3 +95,13 @@ In Paraview, the vtk files are bundled and can be loaded in one step.
 
 - **ASCII format** (default): Human-readable text format, larger file size
 - **Binary format** (`--binary` or `-b` flag): Compact binary format with approximately 70-80% smaller file size and faster loading times in visualization software
+
+## Performance
+
+The Rust implementation is significantly faster than previous C++ implementations due to:
+- Specialized number formatting libraries (ryu, itoa)
+- Efficient buffered I/O strategy
+- Zero-allocation data processing
+- Reusable scratch buffers
+
+For detailed performance analysis and optimization techniques, see [PERFORMANCE.md](PERFORMANCE.md).

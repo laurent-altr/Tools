@@ -155,6 +155,23 @@ impl<W: Write> VtkWriter<W> {
         }
     }
 
+    // Bulk write f32 values from a slice - more efficient than individual writes
+    fn write_f32_slice(&mut self, values: &[f32]) {
+        if self.binary {
+            for &val in values {
+                self.writer.write_all(&val.to_be_bytes()).unwrap();
+            }
+        } else {
+            for &val in values {
+                self.scratch.clear();
+                let s = self.ryu_buf.format(val);
+                self.scratch.extend_from_slice(s.as_bytes());
+                self.scratch.push(b'\n');
+                self.writer.write_all(&self.scratch).unwrap();
+            }
+        }
+    }
+
     fn write_f64(&mut self, val: f64) {
         if self.binary {
             self.writer.write_all(&val.to_be_bytes()).unwrap();
@@ -334,11 +351,40 @@ fn write_elemental_scalar<W: Write>(
     
     for (idx, &count) in counts.iter().enumerate() {
         if idx == active_idx {
-            for i in 0..count {
-                writer.write_f32(values[i]);
-            }
+            // Use bulk write for the entire slice - more efficient
+            writer.write_f32_slice(&values[0..count]);
         } else {
             writer.write_zeros_f32(count);
+        }
+    }
+    writer.newline();
+}
+
+// ****************************************
+// Helper function: write elemental scalar from strided data
+// For data like torseur values where each element has multiple components
+// ****************************************
+fn write_elemental_scalar_strided<W: Write>(
+    writer: &mut VtkWriter<W>,
+    name: &str,
+    counts: &[usize],       // [nb_1d, nb_2d, nb_3d, nb_sph]
+    active_idx: usize,      // which element type has actual values
+    data: &[f32],           // source data array
+    stride: usize,          // stride between elements (e.g., 9 for torseur)
+    offset: usize,          // offset within stride for this component
+    count: usize,           // number of elements
+) {
+    writer.write_header(&format!("SCALARS {} float 1", name));
+    writer.write_header("LOOKUP_TABLE default");
+    
+    for (idx, &elem_count) in counts.iter().enumerate() {
+        if idx == active_idx {
+            // Write strided values
+            for iel in 0..count {
+                writer.write_f32(data[iel * stride + offset]);
+            }
+        } else {
+            writer.write_zeros_f32(elem_count);
         }
     }
     writer.newline();
@@ -1032,26 +1078,28 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
             let counts = [nb_elts_1d, nb_facets, nb_elts_3d, nb_elts_sph];
             for iefun in 0..nb_efunc_1d {
                 let name = replace_underscore(&f_text_1d[iefun]);
-                let values: Vec<f32> = (0..nb_elts_1d)
-                    .map(|iel| efunc_1d[iefun * nb_elts_1d + iel])
-                    .collect();
-                write_elemental_scalar(&mut vtk, &format!("1DELEM_{}", name), &counts, 0, &values);
+                // Direct slice access - no Vec allocation needed
+                let start = iefun * nb_elts_1d;
+                let end = start + nb_elts_1d;
+                write_elemental_scalar(&mut vtk, &format!("1DELEM_{}", name), &counts, 0, &efunc_1d[start..end]);
             }
 
             // 1D torseur values
             let tors_suffixes = ["F1", "F2", "F3", "M1", "M2", "M3", "M4", "M5", "M6"];
             for iefun in 0..nb_tors_1d {
+                let name = replace_underscore(&t_text_1d[iefun]);
+                let base_offset = 9 * iefun * nb_elts_1d;
                 for j in 0..9usize {
-                    let name = replace_underscore(&t_text_1d[iefun]);
-                    let values: Vec<f32> = (0..nb_elts_1d)
-                        .map(|iel| tors_val_1d[9 * iefun * nb_elts_1d + iel * 9 + j])
-                        .collect();
-                    write_elemental_scalar(
+                    // Use strided access - avoids Vec allocation
+                    write_elemental_scalar_strided(
                         &mut vtk,
                         &format!("1DELEM_{}{}", name, tors_suffixes[j]),
                         &counts,
                         0,
-                        &values,
+                        &tors_val_1d[base_offset..],
+                        9,  // stride
+                        j,  // offset within stride
+                        nb_elts_1d,
                     );
                 }
             }
@@ -1059,78 +1107,55 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
             // 2D elemental scalars
             for iefun in 0..nb_efunc {
                 let name = replace_underscore(&f_text_a[iefun + nb_func]);
-                let values: Vec<f32> = (0..nb_facets)
-                    .map(|iel| efunc_a[iefun * nb_facets + iel])
-                    .collect();
-                write_elemental_scalar(&mut vtk, &format!("2DELEM_{}", name), &counts, 1, &values);
+                // Direct slice access - no Vec allocation needed
+                let start = iefun * nb_facets;
+                let end = start + nb_facets;
+                write_elemental_scalar(&mut vtk, &format!("2DELEM_{}", name), &counts, 1, &efunc_a[start..end]);
             }
 
             // 2D tensors
             for ietens in 0..nb_tens {
                 let name = replace_underscore(&t_text_a[ietens]);
-                let values: Vec<f32> = (0..nb_facets)
-                    .flat_map(|iel| {
-                        let base = iel * 3 + ietens * 3 * nb_facets;
-                        vec![tens_val_a[base], tens_val_a[base + 1], tens_val_a[base + 2]]
-                    })
-                    .collect();
-                write_symmetric_tensor_3(&mut vtk, &format!("2DELEM_{}", name), &counts, 1, &values);
+                // Direct slice access - tensor values are already contiguous in memory
+                let start = ietens * 3 * nb_facets;
+                let end = start + 3 * nb_facets;
+                write_symmetric_tensor_3(&mut vtk, &format!("2DELEM_{}", name), &counts, 1, &tens_val_a[start..end]);
             }
 
             // 3D elemental scalars
             for iefun in 0..nb_efunc_3d {
                 let name = replace_underscore(&f_text_3d[iefun]);
-                let values: Vec<f32> = (0..nb_elts_3d)
-                    .map(|iel| efunc_3d[iefun * nb_elts_3d + iel])
-                    .collect();
-                write_elemental_scalar(&mut vtk, &format!("3DELEM_{}", name), &counts, 2, &values);
+                // Direct slice access - no Vec allocation needed
+                let start = iefun * nb_elts_3d;
+                let end = start + nb_elts_3d;
+                write_elemental_scalar(&mut vtk, &format!("3DELEM_{}", name), &counts, 2, &efunc_3d[start..end]);
             }
 
             // 3D tensors
             for ietens in 0..nb_tens_3d {
                 let name = replace_underscore(&t_text_3d[ietens]);
-                let values: Vec<f32> = (0..nb_elts_3d)
-                    .flat_map(|iel| {
-                        let base = iel * 6 + ietens * 6 * nb_elts_3d;
-                        vec![
-                            tens_val_3d[base],
-                            tens_val_3d[base + 1],
-                            tens_val_3d[base + 2],
-                            tens_val_3d[base + 3],
-                            tens_val_3d[base + 4],
-                            tens_val_3d[base + 5],
-                        ]
-                    })
-                    .collect();
-                write_symmetric_tensor_6(&mut vtk, &format!("3DELEM_{}", name), &counts, 2, &values);
+                // Direct slice access - tensor values are already contiguous in memory
+                let start = ietens * 6 * nb_elts_3d;
+                let end = start + 6 * nb_elts_3d;
+                write_symmetric_tensor_6(&mut vtk, &format!("3DELEM_{}", name), &counts, 2, &tens_val_3d[start..end]);
             }
 
             // SPH scalars and tensors
             if flag_a[7] != 0 {
                 for iefun in 0..nb_efunc_sph {
                     let name = replace_underscore(&scal_text_sph[iefun]);
-                    let values: Vec<f32> = (0..nb_elts_sph)
-                        .map(|iel| efunc_sph[iefun * nb_elts_sph + iel])
-                        .collect();
-                    write_elemental_scalar(&mut vtk, &format!("SPHELEM_{}", name), &counts, 3, &values);
+                    // Direct slice access - no Vec allocation needed
+                    let start = iefun * nb_elts_sph;
+                    let end = start + nb_elts_sph;
+                    write_elemental_scalar(&mut vtk, &format!("SPHELEM_{}", name), &counts, 3, &efunc_sph[start..end]);
                 }
 
                 for ietens in 0..nb_tens_sph {
                     let name = replace_underscore(&tens_text_sph[ietens]);
-                    let values: Vec<f32> = (0..nb_elts_sph)
-                        .flat_map(|iel| {
-                            let base = iel * 6 + ietens * 6 * nb_elts_sph;
-                            vec![
-                                tens_val_sph[base],
-                                tens_val_sph[base + 1],
-                                tens_val_sph[base + 2],
-                                tens_val_sph[base + 3],
-                                tens_val_sph[base + 4],
-                                tens_val_sph[base + 5],
-                            ]
-                        })
-                        .collect();
-                    write_symmetric_tensor_6(&mut vtk, &format!("SPHELEM_{}", name), &counts, 3, &values);
+                    // Direct slice access - tensor values are already contiguous in memory
+                    let start = ietens * 6 * nb_elts_sph;
+                    let end = start + 6 * nb_elts_sph;
+                    write_symmetric_tensor_6(&mut vtk, &format!("SPHELEM_{}", name), &counts, 3, &tens_val_sph[start..end]);
                 }
             }
 
