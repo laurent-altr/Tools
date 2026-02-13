@@ -31,9 +31,84 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::process;
 
 use itoa::Buffer as ItoaBuffer;
-use ryu::Buffer as RyuBuffer;
 
 const FASTMAGI10: i32 = 0x542c;
+
+// ****************************************
+// Format floats/doubles to match C++ cout behavior
+// C++ cout uses 6 significant digits by default
+// ****************************************
+fn format_f32_like_cpp(v: f32) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    
+    let abs_v = v.abs();
+    
+    // Use scientific notation for very large or very small numbers
+    if abs_v < 1e-4 || abs_v >= 1e6 {
+        let s = format!("{:.5e}", v);
+        
+        // Clean up exponential notation to match C++ format
+        if let Some(e_pos) = s.find('e') {
+            let (mantissa, exp_part) = s.split_at(e_pos);
+            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+            let exp_str = &exp_part[1..];
+            let exp_val: i32 = exp_str.parse().unwrap();
+            format!("{}e{:+03}", mantissa, exp_val)
+        } else {
+            s
+        }
+    } else {
+        // Calculate significant figures needed for 6 total significant digits
+        let log = abs_v.log10().floor();
+        let decimals = (5.0 - log).max(0.0) as usize;
+        let formatted = format!("{:.prec$}", v, prec = decimals);
+        
+        // Remove trailing zeros after decimal point
+        if formatted.contains('.') {
+            formatted.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            formatted
+        }
+    }
+}
+
+fn format_f64_like_cpp(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    
+    let abs_v = v.abs();
+    
+    // Use scientific notation for very large or very small numbers
+    if abs_v < 1e-4 || abs_v >= 1e6 {
+        let s = format!("{:.5e}", v);
+        
+        // Clean up exponential notation to match C++ format
+        if let Some(e_pos) = s.find('e') {
+            let (mantissa, exp_part) = s.split_at(e_pos);
+            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+            let exp_str = &exp_part[1..];
+            let exp_val: i32 = exp_str.parse().unwrap();
+            format!("{}e{:+03}", mantissa, exp_val)
+        } else {
+            s
+        }
+    } else {
+        // Calculate significant figures needed for 6 total significant digits
+        let log = abs_v.log10().floor();
+        let decimals = (5.0 - log).max(0.0) as usize;
+        let formatted = format!("{:.prec$}", v, prec = decimals);
+        
+        // Remove trailing zeros after decimal point
+        if formatted.contains('.') {
+            formatted.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            formatted
+        }
+    }
+}
 
 // ****************************************
 // read big-endian data from file
@@ -117,7 +192,6 @@ struct VtkWriter<W: Write> {
     binary: bool,
     scratch: Vec<u8>,
     itoa_buf: ItoaBuffer,
-    ryu_buf: RyuBuffer,
 }
 
 impl<W: Write> VtkWriter<W> {
@@ -127,7 +201,6 @@ impl<W: Write> VtkWriter<W> {
             binary,
             scratch: Vec::with_capacity(256),
             itoa_buf: ItoaBuffer::new(),
-            ryu_buf: RyuBuffer::new(),
         }
     }
 
@@ -148,7 +221,7 @@ impl<W: Write> VtkWriter<W> {
             self.writer.write_all(&val.to_be_bytes()).unwrap();
         } else {
             self.scratch.clear();
-            let s = self.ryu_buf.format(val);
+            let s = format_f32_like_cpp(val);
             self.scratch.extend_from_slice(s.as_bytes());
             self.scratch.push(b'\n');
             self.writer.write_all(&self.scratch).unwrap();
@@ -164,7 +237,7 @@ impl<W: Write> VtkWriter<W> {
         } else {
             for &val in values {
                 self.scratch.clear();
-                let s = self.ryu_buf.format(val);
+                let s = format_f32_like_cpp(val);
                 self.scratch.extend_from_slice(s.as_bytes());
                 self.scratch.push(b'\n');
                 self.writer.write_all(&self.scratch).unwrap();
@@ -177,7 +250,7 @@ impl<W: Write> VtkWriter<W> {
             self.writer.write_all(&val.to_be_bytes()).unwrap();
         } else {
             self.scratch.clear();
-            let s = self.ryu_buf.format(val);
+            let s = format_f64_like_cpp(val);
             self.scratch.extend_from_slice(s.as_bytes());
             self.scratch.push(b'\n');
             self.writer.write_all(&self.scratch).unwrap();
@@ -191,13 +264,13 @@ impl<W: Write> VtkWriter<W> {
             self.writer.write_all(&c.to_be_bytes()).unwrap();
         } else {
             self.scratch.clear();
-            let sa = self.ryu_buf.format(a);
+            let sa = format_f32_like_cpp(a);
             self.scratch.extend_from_slice(sa.as_bytes());
             self.scratch.push(b' ');
-            let sb = self.ryu_buf.format(b);
+            let sb = format_f32_like_cpp(b);
             self.scratch.extend_from_slice(sb.as_bytes());
             self.scratch.push(b' ');
-            let sc = self.ryu_buf.format(c);
+            let sc = format_f32_like_cpp(c);
             self.scratch.extend_from_slice(sc.as_bytes());
             self.scratch.push(b'\n');
             self.writer.write_all(&self.scratch).unwrap();
