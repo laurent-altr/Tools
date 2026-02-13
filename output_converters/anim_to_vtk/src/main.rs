@@ -110,6 +110,16 @@ fn replace_underscore(s: &str) -> String {
 }
 
 // ****************************************
+// Output format enum
+// ****************************************
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OutputFormat {
+    VtkAscii,
+    VtkBinary,
+    Unv,
+}
+
+// ****************************************
 // VtkWriter - abstraction for VTK output in binary or ASCII format
 // ****************************************
 struct VtkWriter<W: Write> {
@@ -251,6 +261,111 @@ impl<W: Write> VtkWriter<W> {
             self.scratch.push(b'\n');
             self.writer.write_all(&self.scratch).unwrap();
         }
+    }
+}
+
+// ****************************************
+// UnvWriter - abstraction for UNV (Universal File Format) output
+// ****************************************
+struct UnvWriter<W: Write> {
+    writer: BufWriter<W>,
+    itoa_buf: ItoaBuffer,
+    ryu_buf: RyuBuffer,
+    scratch: Vec<u8>,
+}
+
+impl<W: Write> UnvWriter<W> {
+    fn new(writer: W) -> Self {
+        UnvWriter {
+            writer: BufWriter::new(writer),
+            itoa_buf: ItoaBuffer::new(),
+            ryu_buf: RyuBuffer::new(),
+            scratch: Vec::with_capacity(256),
+        }
+    }
+
+    // Write dataset separator
+    fn write_dataset_start(&mut self, dataset_num: i32) {
+        write!(self.writer, "    -1\n").unwrap();
+        write!(self.writer, "{:6}\n", dataset_num).unwrap();
+    }
+
+    fn write_dataset_end(&mut self) {
+        write!(self.writer, "    -1\n").unwrap();
+    }
+
+    // Write nodes in dataset 2411 format
+    fn write_nodes_2411(&mut self, node_ids: &[i32], coordinates: &[f32]) {
+        self.write_dataset_start(2411);
+        
+        for (i, &node_id) in node_ids.iter().enumerate() {
+            let x = coordinates[i * 3];
+            let y = coordinates[i * 3 + 1];
+            let z = coordinates[i * 3 + 2];
+            
+            // Line 1: node label, export coordinate system number (1), displacement coordinate system number (1), color (1)
+            write!(self.writer, "{:10}         1         1         1\n", node_id).unwrap();
+            
+            // Line 2: x, y, z coordinates in 1P25.16E format (scientific notation)
+            write!(self.writer, "{:25.16E}{:25.16E}{:25.16E}\n", x as f64, y as f64, z as f64).unwrap();
+        }
+        
+        self.write_dataset_end();
+    }
+
+    // Write elements in dataset 2412 format
+    fn write_elements_2412(
+        &mut self,
+        elem_1d: &[(i32, Vec<i32>)],        // (elem_id, [node1, node2])
+        elem_2d: &[(i32, Vec<i32>)],        // (elem_id, [node1, node2, node3, node4])
+        elem_3d: &[(i32, Vec<i32>)],        // (elem_id, [node1, ..., node8])
+        elem_sph: &[(i32, i32)],             // (elem_id, node1)
+    ) {
+        self.write_dataset_start(2412);
+        
+        // Write 1D elements (beams) - element type 11 (2-node beam)
+        for (elem_id, nodes) in elem_1d {
+            write!(self.writer, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                elem_id, 11, 1, 1, 1, nodes.len()).unwrap();
+            for node in nodes {
+                write!(self.writer, "{:10}", node).unwrap();
+            }
+            write!(self.writer, "\n").unwrap();
+        }
+        
+        // Write 2D elements (shells) - element type 44 (4-node quad) or 91 (3-node tri)
+        for (elem_id, nodes) in elem_2d {
+            let elem_type = if nodes.len() == 3 { 91 } else { 44 };
+            write!(self.writer, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                elem_id, elem_type, 1, 1, 1, nodes.len()).unwrap();
+            for node in nodes {
+                write!(self.writer, "{:10}", node).unwrap();
+            }
+            write!(self.writer, "\n").unwrap();
+        }
+        
+        // Write 3D elements (solids) - element type 115 (8-node brick)
+        for (elem_id, nodes) in elem_3d {
+            write!(self.writer, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                elem_id, 115, 1, 1, 1, nodes.len()).unwrap();
+            for node in nodes {
+                write!(self.writer, "{:10}", node).unwrap();
+            }
+            write!(self.writer, "\n").unwrap();
+        }
+        
+        // Write SPH elements as point elements - element type 136 (point element)
+        for (elem_id, node) in elem_sph {
+            write!(self.writer, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                elem_id, 136, 1, 1, 1, 1).unwrap();
+            write!(self.writer, "{:10}\n", node).unwrap();
+        }
+        
+        self.write_dataset_end();
+    }
+
+    fn flush(&mut self) {
+        self.writer.flush().unwrap();
     }
 }
 
@@ -1169,22 +1284,255 @@ fn read_radioss_anim<W: Write>(file_name: &str, binary_format: bool, writer: W) 
     }
 }
 
+// convert an A-File to UNV format
+// ****************************************
+fn read_radioss_anim_unv<W: Write>(file_name: &str, writer: W) {
+    let input_file = File::open(file_name).unwrap_or_else(|_| {
+        eprintln!("Can't open input file {}", file_name);
+        process::exit(1);
+    });
+    let mut inf = BufReader::new(input_file);
+
+    let mut unv = UnvWriter::new(writer);
+
+    let magic = read_i32(&mut inf);
+
+    match magic {
+        FASTMAGI10 => {
+            let _a_time = read_f32(&mut inf);
+            let _time_text = read_text(&mut inf, 81);
+            let _mod_anim_text = read_text(&mut inf, 81);
+            let _radioss_run_text = read_text(&mut inf, 81);
+
+            let flag_a = read_i32_vec(&mut inf, 10);
+
+            // ********************
+            // 2D GEOMETRY
+            // ********************
+            let nb_nodes = read_i32(&mut inf) as usize;
+            let nb_facets = read_i32(&mut inf) as usize;
+            let nb_parts = read_i32(&mut inf) as usize;
+            let nb_func = read_i32(&mut inf) as usize;
+            let nb_efunc = read_i32(&mut inf) as usize;
+            let nb_vect = read_i32(&mut inf) as usize;
+            let nb_tens = read_i32(&mut inf) as usize;
+            let nb_skew = read_i32(&mut inf) as usize;
+
+            if nb_skew > 0 {
+                let _skew_short = read_u16_vec(&mut inf, nb_skew * 6);
+            }
+
+            let coor_a = read_f32_vec(&mut inf, 3 * nb_nodes);
+
+            let mut connect_a: Vec<i32> = Vec::new();
+            let mut _del_elt_a: Vec<u8> = Vec::new();
+            if nb_facets > 0 {
+                connect_a = read_i32_vec(&mut inf, nb_facets * 4);
+                _del_elt_a = read_bytes(&mut inf, nb_facets);
+            }
+
+            let mut _def_part_a: Vec<i32> = Vec::new();
+            let mut _p_text_a: Vec<String> = Vec::new();
+            if nb_parts > 0 {
+                _def_part_a = read_i32_vec(&mut inf, nb_parts);
+                _p_text_a = (0..nb_parts)
+                    .map(|_| read_text(&mut inf, 50))
+                    .collect();
+            }
+
+            let _norm_short_a = read_u16_vec(&mut inf, 3 * nb_nodes);
+
+            if nb_func + nb_efunc > 0 {
+                let _f_text_a: Vec<String> = (0..nb_func + nb_efunc)
+                    .map(|_| read_text(&mut inf, 81))
+                    .collect();
+                if nb_func > 0 {
+                    let _func_a = read_f32_vec(&mut inf, nb_nodes * nb_func);
+                }
+                if nb_efunc > 0 {
+                    let _efunc_a = read_f32_vec(&mut inf, nb_facets * nb_efunc);
+                }
+            }
+
+            if nb_vect > 0 {
+                let _v_text_a: Vec<String> = (0..nb_vect)
+                    .map(|_| read_text(&mut inf, 81))
+                    .collect();
+            }
+            let _vect_val_a = read_f32_vec(&mut inf, 3 * nb_nodes * nb_vect);
+
+            if nb_tens > 0 {
+                let _t_text_a: Vec<String> = (0..nb_tens)
+                    .map(|_| read_text(&mut inf, 81))
+                    .collect();
+                let _tens_val_a = read_f32_vec(&mut inf, 3 * nb_facets * nb_tens);
+            }
+
+            // ********************
+            // 3D GEOMETRY
+            // ********************
+            let mut nb_elts_3d: usize = 0;
+            let mut connect_3d: Vec<i32> = Vec::new();
+            if flag_a[2] != 0 {
+                nb_elts_3d = read_i32(&mut inf) as usize;
+                let nb_parts_3d = read_i32(&mut inf) as usize;
+                let nb_efunc_3d = read_i32(&mut inf) as usize;
+                let nb_tens_3d = read_i32(&mut inf) as usize;
+
+                if nb_elts_3d > 0 {
+                    connect_3d = read_i32_vec(&mut inf, nb_elts_3d * 8);
+                    let _del_elt_3d = read_bytes(&mut inf, nb_elts_3d);
+                }
+                if nb_parts_3d > 0 {
+                    let _def_part_3d = read_i32_vec(&mut inf, nb_parts_3d);
+                    let _p_text_3d: Vec<String> = (0..nb_parts_3d)
+                        .map(|_| read_text(&mut inf, 50))
+                        .collect();
+                }
+                if nb_efunc_3d > 0 {
+                    let _scal_text_3d: Vec<String> = (0..nb_efunc_3d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    let _efunc_3d = read_f32_vec(&mut inf, nb_efunc_3d * nb_elts_3d);
+                }
+                if nb_tens_3d > 0 {
+                    let _tens_text_3d: Vec<String> = (0..nb_tens_3d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    let _tens_val_3d = read_f32_vec(&mut inf, nb_elts_3d * nb_tens_3d * 6);
+                }
+            }
+
+            // ********************
+            // 1D GEOMETRY
+            // ********************
+            let mut nb_elts_1d: usize = 0;
+            let mut connect_1d: Vec<i32> = Vec::new();
+            if flag_a[3] != 0 {
+                nb_elts_1d = read_i32(&mut inf) as usize;
+                let nb_parts_1d = read_i32(&mut inf) as usize;
+                let nb_efunc_1d = read_i32(&mut inf) as usize;
+                let nb_tens_1d = read_i32(&mut inf) as usize;
+
+                if nb_elts_1d > 0 {
+                    connect_1d = read_i32_vec(&mut inf, nb_elts_1d * 2);
+                    let _del_elt_1d = read_bytes(&mut inf, nb_elts_1d);
+                }
+                if nb_parts_1d > 0 {
+                    let _def_part_1d = read_i32_vec(&mut inf, nb_parts_1d);
+                    let _p_text_1d: Vec<String> = (0..nb_parts_1d)
+                        .map(|_| read_text(&mut inf, 50))
+                        .collect();
+                }
+                if nb_efunc_1d > 0 {
+                    let _scal_text_1d: Vec<String> = (0..nb_efunc_1d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    let _efunc_1d = read_f32_vec(&mut inf, nb_efunc_1d * nb_elts_1d);
+                }
+                if nb_tens_1d > 0 {
+                    let _tens_text_1d: Vec<String> = (0..nb_tens_1d)
+                        .map(|_| read_text(&mut inf, 81))
+                        .collect();
+                    let _tens_val_1d = read_f32_vec(&mut inf, 9 * nb_tens_1d * nb_elts_1d);
+                }
+            }
+
+            // Skip remaining sections (we only need geometry for UNV)
+            // Note: In a complete implementation, you would read all sections
+            // For now, we'll just output what we have
+
+            // ********************
+            // UNV output
+            // ********************
+
+            // Write nodes (dataset 2411)
+            let node_ids: Vec<i32> = (1..=nb_nodes as i32).collect();
+            unv.write_nodes_2411(&node_ids, &coor_a);
+
+            // Prepare element data
+            let mut elem_1d = Vec::new();
+            let mut elem_2d = Vec::new();
+            let mut elem_3d = Vec::new();
+            let elem_sph = Vec::new(); // No SPH in simplified version
+
+            // Build 1D elements
+            for i in 0..nb_elts_1d {
+                let elem_id = (i + 1) as i32;
+                let nodes = vec![connect_1d[i * 2], connect_1d[i * 2 + 1]];
+                elem_1d.push((elem_id, nodes));
+            }
+
+            // Build 2D elements
+            let mut elem_id_offset = nb_elts_1d as i32;
+            for i in 0..nb_facets {
+                let elem_id = elem_id_offset + (i + 1) as i32;
+                let nodes = vec![
+                    connect_a[i * 4],
+                    connect_a[i * 4 + 1],
+                    connect_a[i * 4 + 2],
+                    connect_a[i * 4 + 3],
+                ];
+                elem_2d.push((elem_id, nodes));
+            }
+
+            // Build 3D elements
+            elem_id_offset += nb_facets as i32;
+            for i in 0..nb_elts_3d {
+                let elem_id = elem_id_offset + (i + 1) as i32;
+                let nodes = vec![
+                    connect_3d[i * 8],
+                    connect_3d[i * 8 + 1],
+                    connect_3d[i * 8 + 2],
+                    connect_3d[i * 8 + 3],
+                    connect_3d[i * 8 + 4],
+                    connect_3d[i * 8 + 5],
+                    connect_3d[i * 8 + 6],
+                    connect_3d[i * 8 + 7],
+                ];
+                elem_3d.push((elem_id, nodes));
+            }
+
+            // Write elements (dataset 2412)
+            unv.write_elements_2412(&elem_1d, &elem_2d, &elem_3d, &elem_sph);
+
+            unv.flush();
+        }
+
+        _ => {
+            eprintln!("Error in Anim Files version");
+            process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <filename1> [filename2 ...] [--binary]", args[0]);
-        eprintln!("  --binary : Output in binary VTK format (default is ASCII)");
-        eprintln!("  Output files will have .vtk extension added automatically");
+        eprintln!("Usage: {} <filename1> [filename2 ...] [--binary] [--unv]", args[0]);
+        eprintln!("  --binary : Output in binary VTK format (default is ASCII VTK)");
+        eprintln!("  --unv    : Output in UNV format (default is ASCII VTK)");
+        eprintln!("  Output files will have .vtk or .unv extension added automatically");
         process::exit(1);
     }
     
-    // Check if --binary flag is present
-    let binary_format = args.iter().any(|arg| arg == "--binary" || arg == "-b");
+    // Check for format flags
+    let has_unv_flag = args.iter().any(|arg| arg == "--unv");
+    let has_binary_flag = args.iter().any(|arg| arg == "--binary" || arg == "-b");
     
-    // Collect all input files (skip program name and --binary flag)
+    // Determine output format
+    let output_format = if has_unv_flag {
+        OutputFormat::Unv
+    } else if has_binary_flag {
+        OutputFormat::VtkBinary
+    } else {
+        OutputFormat::VtkAscii
+    };
+    
+    // Collect all input files (skip program name and format flags)
     let input_files: Vec<&String> = args[1..]
         .iter()
-        .filter(|arg| *arg != "--binary" && *arg != "-b")
+        .filter(|arg| *arg != "--binary" && *arg != "-b" && *arg != "--unv")
         .collect();
     
     if input_files.is_empty() {
@@ -1197,8 +1545,11 @@ fn main() {
     let mut successful_files = 0;
     
     for file_name in input_files {
-        // Always append .vtk extension to create output filename
-        let output_file_name = format!("{}.vtk", file_name);
+        // Determine output file extension based on format
+        let output_file_name = match output_format {
+            OutputFormat::Unv => format!("{}.unv", file_name),
+            _ => format!("{}.vtk", file_name),
+        };
         
         // Verify input file exists before creating output file
         if !std::path::Path::new(file_name.as_str()).exists() {
@@ -1217,7 +1568,14 @@ fn main() {
         };
         
         eprintln!("Converting {} to {}", file_name, output_file_name);
-        read_radioss_anim(file_name, binary_format, output_file);
+        
+        // Call appropriate conversion function based on format
+        match output_format {
+            OutputFormat::Unv => read_radioss_anim_unv(file_name, output_file),
+            OutputFormat::VtkBinary => read_radioss_anim(file_name, true, output_file),
+            OutputFormat::VtkAscii => read_radioss_anim(file_name, false, output_file),
+        }
+        
         successful_files += 1;
     }
     
