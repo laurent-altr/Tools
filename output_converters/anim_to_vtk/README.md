@@ -1,6 +1,6 @@
 # anim_to_vtk
 
-anim_to_vtk is an external tool to convert OpenRadioss animation files to legacy VTK format (ASCII or binary).
+anim_to_vtk is an external tool to convert OpenRadioss animation files to legacy VTK format (ASCII or binary) or UNV format.
 
 ## How to build
 
@@ -93,8 +93,24 @@ In Paraview, the vtk files are bundled and can be loaded in one step.
 
 ### Output Format Options
 
-- **ASCII format** (default): Human-readable text format, larger file size
-- **Binary format** (`--binary` or `-b` flag): Compact binary format with approximately 70-80% smaller file size and faster loading times in visualization software
+- **ASCII VTK format** (default): Human-readable text format, larger file size
+- **Binary VTK format** (`--binary` or `-b` flag): Compact binary format with approximately 70-80% smaller file size and faster loading times in visualization software
+- **UNV format** (`--unv` flag): Universal File Format for I-DEAS and other FEA software
+
+#### UNV Format Output
+
+To generate UNV format output:
+
+        ./anim_to_vtk [Deck Rootname]A001 --unv
+
+This creates `[Deck Rootname]A001.unv`
+
+The UNV format output includes:
+- Dataset 2411: Node coordinates
+- Dataset 2412: Element connectivity (1D beams, 2D shells/triangles, 3D solids, SPH particles)
+- Dataset 2414: Analysis data (nodal scalars and vectors)
+
+Note: UNV format is always output in ASCII text format.
 
 ## Performance
 
