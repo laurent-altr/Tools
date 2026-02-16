@@ -1,0 +1,28 @@
+#!/bin/bash
+
+#
+# check if exec directory exists, create if not
+#
+if [ ! -d ../../../exec ]
+then
+   mkdir ../../../exec
+fi
+
+ EXEC_DIR=$(cd ../../../exec && pwd)
+ cd ..
+ cargo build --release
+ export BUILD_RETURN_CODE=$?
+ if [ $BUILD_RETURN_CODE -ne 0 ]
+ then
+    echo " " 
+    echo "Build failed"
+    echo " " 
+    exit $BUILD_RETURN_CODE
+ fi
+
+ cp target/release/compare_vtk "$EXEC_DIR/compare_vtk_linuxa64"
+
+ echo " " 
+ echo "Build succeeded"
+ echo " "
+ exit 0

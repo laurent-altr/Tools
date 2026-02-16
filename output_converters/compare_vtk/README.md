@@ -20,7 +20,30 @@ This tool is designed to validate VTK file converters by comparing their output 
 
 ## Building
 
-### Using Cargo
+A Rust toolchain installation is required. Install from https://rustup.rs/
+
+### Linux
+
+Enter the platform directory: `compare_vtk/linux64`
+Apply the build script: `./build.bash`
+
+Executable will be copied to `[Tools]/exec` directory
+
+### Linux ARM64
+
+Enter the platform directory: `compare_vtk/linuxa64`
+Apply the build script: `./build.bash`
+
+Executable will be copied to `[Tools]/exec` directory
+
+### Windows
+
+Enter the platform directory: `compare_vtk/win64`
+Apply the script: `build.bat`
+
+Executable is copied to `[Tools]/exec`
+
+### Using Cargo directly
 
 From the `compare_vtk` directory:
 
