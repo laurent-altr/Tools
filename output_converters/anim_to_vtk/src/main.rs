@@ -135,7 +135,7 @@ fn read_bytes<R: Read>(reader: &mut R, count: usize) -> Vec<u8> {
 /// embedded in the animation file.
 fn read_text<R: Read>(reader: &mut R, count: usize) -> String {
     let buf = read_bytes(reader, count);
-    let s = std::str::from_utf8(&buf).unwrap_or("");
+    let s = String::from_utf8_lossy(&buf);
     s.trim_end_matches('\0').to_string()
 }
 
@@ -175,7 +175,7 @@ fn compute_max_threads(file_sizes: &[u64]) -> usize {
     let mem_limit = match (mem_available, max_file) {
         (Some(mem), size) if size > 0 => {
             let usable = (mem as f64 * 0.8) as u64;
-            let threads = (usable / size) as usize;
+            let threads = (usable / size.saturating_mul(2)) as usize;
             if threads == 0 { 1 } else { threads }
         }
         _ => 1,
@@ -259,8 +259,7 @@ fn write_i32_fast(buf: &mut [u8], val: i32) -> usize {
         write_u32_fast(buf, val as u32)
     } else {
         buf[0] = b'-';
-        let v = (-(val as i64)) as u32;
-        1 + write_u32_fast(&mut buf[1..], v)
+        1 + write_u32_fast(&mut buf[1..], val.unsigned_abs())
     }
 }
 
@@ -404,6 +403,25 @@ fn strip_trailing_zeros(mut val: u64, digits: u32) -> (u64, u32) {
     (val, d)
 }
 
+/// Round an `f64` to the nearest integer using round-half-to-even
+/// (banker's rounding), matching C `printf` behavior.
+///
+/// When the fractional part is exactly 0.5, the value is rounded to the
+/// nearest even integer.  For example, `2.5 → 2`, `3.5 → 4`.
+#[inline(always)]
+fn round_half_to_even(v: f64) -> u64 {
+    let floor = v as u64;
+    let frac = v - floor as f64;
+    if frac > 0.5 {
+        floor + 1
+    } else if frac < 0.5 {
+        floor
+    } else {
+        // Exactly 0.5: round to even
+        if floor % 2 == 0 { floor } else { floor + 1 }
+    }
+}
+
 /// Format an `f64` value as `%.6g` (6 significant digits, shortest
 /// representation), writing directly into `buf`.
 ///
@@ -418,7 +436,7 @@ fn format_g6(buf: &mut [u8], val: f64) -> usize {
     }
     let mut pos = 0usize;
     let mut v = val;
-    if val.is_sign_negative() && val != 0.0 {
+    if val.is_sign_negative() {
         if val.is_infinite() {
             buf[..4].copy_from_slice(b"-inf");
             return 4;
@@ -444,7 +462,7 @@ fn format_g6(buf: &mut [u8], val: f64) -> usize {
     if exp10 >= -4 && exp10 < PRECISION {
         let frac_digits = (PRECISION - 1 - exp10).max(0) as u32;
         let scale = pow10_f64(frac_digits as i32);
-        let rounded = (v * scale + 0.5) as u64;
+        let rounded = round_half_to_even(v * scale);
 
         // Check if rounding carried into the next order of magnitude,
         // which would push us into exponential notation territory.
@@ -503,7 +521,7 @@ fn format_g6_exp(buf: &mut [u8], mut pos: usize, v: f64, exp10: i32) -> usize {
     let frac_digits = (PRECISION - 1) as u32;
     let scale = pow10_f64(frac_digits as i32);
     let sig = v / pow10_f64(exp10);
-    let mut rounded = (sig * scale + 0.5) as u64;
+    let mut rounded = round_half_to_even(sig * scale);
     let mut e = exp10;
 
     if rounded >= POW10_U64[(frac_digits + 1) as usize] {
@@ -565,6 +583,23 @@ fn format_g6_exp(buf: &mut [u8], mut pos: usize, v: f64, exp10: i32) -> usize {
         pos += elen;
     }
     pos
+}
+
+// =====================================================================
+// Output format selection
+// =====================================================================
+
+/// Output format selection for the converter.
+#[derive(Clone, Copy, PartialEq)]
+enum OutputFormat {
+    /// VTK ASCII with fast Ryu float formatting (default).
+    VtkAscii,
+    /// VTK ASCII with legacy `%.6g` float formatting.
+    VtkLegacy,
+    /// VTK binary (big-endian).
+    VtkBinary,
+    /// Universal File Format (.unv) for FEMAP / Simcenter.
+    Unv,
 }
 
 // =====================================================================
@@ -1253,21 +1288,516 @@ fn write_symmetric_tensor_3<W: Write>(
 }
 
 // =====================================================================
+// UNV (Universal File Format) output helpers
+// =====================================================================
+// The Universal File Format (.unv) is an ASCII interchange format used
+// by FEMAP, Simcenter, and other FEA pre/post-processors.  Data is
+// organised in numbered "datasets", each delimited by `    -1` lines.
+//
+// Datasets used:
+//   2411 – Node definitions (label, coordinates)
+//   2412 – Element definitions (label, type, connectivity)
+//   2414 – Analysis results (scalars, vectors, tensors at nodes/elements)
+//
+// Element type mapping (FE Descriptor IDs):
+//   11  = Rod              (1D, 2 nodes)
+//   91  = Thin Shell Tri   (2D, 3 nodes – degenerate quad)
+//   94  = Thin Shell Quad  (2D, 4 nodes)
+//   111 = Solid Tetrahedron(3D, 4 nodes – degenerate hex)
+//   115 = Solid Brick      (3D, 8 nodes)
+//   161 = Lumped Mass      (SPH, 1 node)
+
+/// UNV FE Descriptor IDs.
+const UNV_ROD: i32 = 11;
+const UNV_TRIA3: i32 = 91;
+const UNV_QUAD4: i32 = 94;
+const UNV_TET4: i32 = 111;
+const UNV_HEX8: i32 = 115;
+const UNV_MASS: i32 = 161;
+
+/// Write the UNV dataset delimiter line (`    -1`).
+#[inline]
+fn unv_delimiter(w: &mut impl Write) {
+    w.write_all(b"    -1\n").unwrap();
+}
+
+/// Write UNV Dataset 2411 – Nodes.
+///
+/// Each node is two records:
+///   Record 1: label, export_cs, disp_cs, color  (FORMAT 4I10)
+///   Record 2: x, y, z                           (FORMAT 1P3D25.16)
+fn write_unv_2411(
+    w: &mut impl Write,
+    nb_nodes: usize,
+    coor: &[f32],
+    nod_num: &[i32],
+) {
+    unv_delimiter(w);
+    w.write_all(b"  2411\n").unwrap();
+    for i in 0..nb_nodes {
+        let label = if !nod_num.is_empty() { nod_num[i] } else { (i as i32) + 1 };
+        write!(w, "{:10}{:10}{:10}{:10}\n", label, 0, 0, 0).unwrap();
+        write!(w, "{:25.16E}{:25.16E}{:25.16E}\n",
+            coor[3 * i] as f64,
+            coor[3 * i + 1] as f64,
+            coor[3 * i + 2] as f64,
+        ).unwrap();
+    }
+    unv_delimiter(w);
+}
+
+/// Write UNV Dataset 2412 – Elements.
+///
+/// Each element is two records (no beam‐orientation record for rod/mass):
+///   Record 1: label, fe_id, phys_prop, mat_prop, color, num_nodes (6I10)
+///   Record 2: node labels                                         (8I10)
+///
+/// `node_label` maps a 0-based node index to its UNV node label.
+fn write_unv_2412(
+    w: &mut impl Write,
+    // 1D
+    nb_elts_1d: usize, connect_1d: &[i32], el_num_1d: &[i32],
+    def_part_1d: &[i32], p_text_1d: &[String],
+    // 2D
+    nb_facets: usize, connect_a: &[i32], el_num_a: &[i32],
+    def_part_a: &[i32], p_text_a: &[String],
+    is_2d_triangle: &[bool],
+    // 3D
+    nb_elts_3d: usize, connect_3d: &[i32], el_num_3d: &[i32],
+    def_part_3d: &[i32], p_text_3d: &[String],
+    is_3d_tet: &[bool], tetra_nodes: &[[i32; 4]],
+    // SPH
+    nb_elts_sph: usize, connec_sph: &[i32], nod_num_sph: &[i32],
+    def_part_sph: &[i32], p_text_sph: &[String],
+    // node label mapping
+    node_label: &dyn Fn(i32) -> i32,
+) {
+    unv_delimiter(w);
+    w.write_all(b"  2412\n").unwrap();
+
+    // Sequential element label counter (1-based)
+    let mut eid: i32 = 1;
+
+    // FEMAP requires phys_prop and mat_prop IDs >= 1; clamp to avoid
+    // "Property 0 Does Not Exist" errors on import.
+    let clamp_pid = |pid: i32| -> i32 { if pid < 1 { 1 } else { pid } };
+
+    // --- 1D elements (Rod, FE type 11) ---
+    // FE types 11, 21-24, 31-36 require a beam orientation record
+    // (Record 2) between the element header and the node list:
+    //   beam_orientation_node, fore_end_cs, aft_end_cs  (3I10)
+    let mut pi = 0usize;
+    for iel in 0..nb_elts_1d {
+        let label = if !el_num_1d.is_empty() { el_num_1d[iel] } else { eid };
+        let part_id = clamp_pid(resolve_part_id(iel, &mut pi, def_part_1d, p_text_1d));
+        let n1 = node_label(connect_1d[iel * 2]);
+        let n2 = node_label(connect_1d[iel * 2 + 1]);
+        write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+            label, UNV_ROD, part_id, part_id, 0, 2).unwrap();
+        // Beam orientation record (required for FE type 11)
+        write!(w, "{:10}{:10}{:10}\n", 0, 0, 0).unwrap();
+        write!(w, "{:10}{:10}\n", n1, n2).unwrap();
+        eid += 1;
+    }
+
+    // --- 2D elements (Tri 91 / Quad 94) ---
+    pi = 0;
+    for iel in 0..nb_facets {
+        let label = if !el_num_a.is_empty() { el_num_a[iel] } else { eid };
+        let part_id = clamp_pid(resolve_part_id(iel, &mut pi, def_part_a, p_text_a));
+        if is_2d_triangle[iel] {
+            // Extract 3 unique nodes from degenerate quad
+            let base = iel * 4;
+            let mut uniq = [0i32; 3];
+            let mut cnt = 0usize;
+            for k in 0..4 {
+                let n = connect_a[base + k];
+                let mut seen = false;
+                for u in 0..cnt { if uniq[u] == n { seen = true; break; } }
+                if !seen && cnt < 3 { uniq[cnt] = n; cnt += 1; }
+            }
+            write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                label, UNV_TRIA3, part_id, part_id, 0, 3).unwrap();
+            write!(w, "{:10}{:10}{:10}\n",
+                node_label(uniq[0]), node_label(uniq[1]), node_label(uniq[2])).unwrap();
+        } else {
+            let base = iel * 4;
+            write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                label, UNV_QUAD4, part_id, part_id, 0, 4).unwrap();
+            write!(w, "{:10}{:10}{:10}{:10}\n",
+                node_label(connect_a[base]),
+                node_label(connect_a[base + 1]),
+                node_label(connect_a[base + 2]),
+                node_label(connect_a[base + 3]),
+            ).unwrap();
+        }
+        eid += 1;
+    }
+
+    // --- 3D elements (Tet 111 / Hex 115) ---
+    pi = 0;
+    for iel in 0..nb_elts_3d {
+        let label = if !el_num_3d.is_empty() { el_num_3d[iel] } else { eid };
+        let part_id = clamp_pid(resolve_part_id(iel, &mut pi, def_part_3d, p_text_3d));
+        if is_3d_tet[iel] {
+            let tet = tetra_nodes[iel];
+            write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                label, UNV_TET4, part_id, part_id, 0, 4).unwrap();
+            write!(w, "{:10}{:10}{:10}{:10}\n",
+                node_label(tet[0]), node_label(tet[1]),
+                node_label(tet[2]), node_label(tet[3]),
+            ).unwrap();
+        } else {
+            let base = iel * 8;
+            write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                label, UNV_HEX8, part_id, part_id, 0, 8).unwrap();
+            write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}{:10}{:10}\n",
+                node_label(connect_3d[base]),
+                node_label(connect_3d[base + 1]),
+                node_label(connect_3d[base + 2]),
+                node_label(connect_3d[base + 3]),
+                node_label(connect_3d[base + 4]),
+                node_label(connect_3d[base + 5]),
+                node_label(connect_3d[base + 6]),
+                node_label(connect_3d[base + 7]),
+            ).unwrap();
+        }
+        eid += 1;
+    }
+
+    // --- SPH elements (Mass, FE type 161) ---
+    pi = 0;
+    for iel in 0..nb_elts_sph {
+        let label = if !nod_num_sph.is_empty() { nod_num_sph[iel] } else { eid };
+        let part_id = clamp_pid(resolve_part_id(iel, &mut pi, def_part_sph, p_text_sph));
+        write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+            label, UNV_MASS, part_id, part_id, 0, 1).unwrap();
+        write!(w, "{:10}\n", node_label(connec_sph[iel])).unwrap();
+        eid += 1;
+    }
+
+    unv_delimiter(w);
+}
+
+/// Write the header block of UNV Dataset 2414 (analysis results).
+///
+/// Returns immediately after writing the header records (1–13).
+/// The caller must then write the per-node or per-element data records
+/// and close with `unv_delimiter`.
+///
+/// `location`: 1 = data at nodes, 2 = data on elements.
+/// `data_char`: 1 = scalar (nvaldc=1), 2 = 3-DOF vector (nvaldc=3),
+///              4 = symmetric tensor (nvaldc=6).
+fn write_unv_2414_header(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    location: i32,
+    data_char: i32,
+    nvaldc: i32,
+    a_time: f32,
+) {
+    unv_delimiter(w);
+    w.write_all(b"  2414\n").unwrap();
+    // Record 1: dataset label
+    write!(w, "{:10}\n", dataset_label).unwrap();
+    // Record 2: dataset name (max 80 chars)
+    writeln!(w, "{}", &name[..name.len().min(80)]).unwrap();
+    // Record 3: location
+    write!(w, "{:10}\n", location).unwrap();
+    // Records 4-8: ID lines
+    writeln!(w, "OpenRadioss Animation Results").unwrap();
+    writeln!(w, "Time = {:E}", a_time).unwrap();
+    writeln!(w, "NONE").unwrap();
+    writeln!(w, "NONE").unwrap();
+    writeln!(w, "NONE").unwrap();
+    // Record 9: model_type, analysis_type, data_char, result_type, data_type, nvaldc
+    //   model_type=1 (structural), analysis_type=0 (unknown),
+    //   data_type=2 (real single precision)
+    write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+        1, 0, data_char, 0, 2, nvaldc).unwrap();
+    // Record 10: 8 integer analysis-specific values (all zero)
+    write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}{:10}{:10}\n",
+        0, 0, 0, 0, 0, 0, 0, 0).unwrap();
+    // Record 11: 6 more integer values (all zero)
+    write!(w, "{:10}{:10}{:10}{:10}{:10}{:10}\n",
+        0, 0, 0, 0, 0, 0).unwrap();
+    // Record 12: 6 real analysis-specific values (time in first field)
+    write!(w, "{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}\n",
+        a_time as f64, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+    // Record 13: 6 more real values (all zero)
+    write!(w, "{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}\n",
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+}
+
+/// Write a nodal scalar result as UNV Dataset 2414.
+fn write_unv_nodal_scalar(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    nb_nodes: usize,
+    nod_num: &[i32],
+    values: &[f32],
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 1, 1, 1, a_time);
+    for i in 0..nb_nodes {
+        let label = if !nod_num.is_empty() { nod_num[i] } else { (i as i32) + 1 };
+        write!(w, "{:10}\n", label).unwrap();
+        write!(w, "{:13.5E}\n", values[i] as f64).unwrap();
+    }
+    unv_delimiter(w);
+}
+
+/// Write a nodal integer scalar as UNV Dataset 2414 (stored as float).
+fn write_unv_nodal_i32(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    nb_nodes: usize,
+    nod_num: &[i32],
+    values: &[i32],
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 1, 1, 1, a_time);
+    for i in 0..nb_nodes {
+        let label = if !nod_num.is_empty() { nod_num[i] } else { (i as i32) + 1 };
+        write!(w, "{:10}\n", label).unwrap();
+        write!(w, "{:13.5E}\n", values[i] as f64).unwrap();
+    }
+    unv_delimiter(w);
+}
+
+/// Write a nodal 3-DOF vector result as UNV Dataset 2414.
+fn write_unv_nodal_vector(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    nb_nodes: usize,
+    nod_num: &[i32],
+    values: &[f32],   // interleaved x,y,z for each node
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 1, 2, 3, a_time);
+    for i in 0..nb_nodes {
+        let label = if !nod_num.is_empty() { nod_num[i] } else { (i as i32) + 1 };
+        write!(w, "{:10}\n", label).unwrap();
+        write!(w, "{:13.5E}{:13.5E}{:13.5E}\n",
+            values[3 * i] as f64,
+            values[3 * i + 1] as f64,
+            values[3 * i + 2] as f64,
+        ).unwrap();
+    }
+    unv_delimiter(w);
+}
+
+/// Helper: build a vector of sequential element labels across all
+/// element types (1D, 2D, 3D, SPH), using explicit numbering when
+/// available and falling back to 1-based sequential IDs.
+fn build_element_labels(
+    nb_1d: usize, el_num_1d: &[i32],
+    nb_2d: usize, el_num_a: &[i32],
+    nb_3d: usize, el_num_3d: &[i32],
+    nb_sph: usize, nod_num_sph: &[i32],
+) -> Vec<i32> {
+    let total = nb_1d + nb_2d + nb_3d + nb_sph;
+    let mut labels = Vec::with_capacity(total);
+    let mut seq: i32 = 1;
+    for i in 0..nb_1d {
+        labels.push(if !el_num_1d.is_empty() { el_num_1d[i] } else { seq });
+        seq += 1;
+    }
+    for i in 0..nb_2d {
+        labels.push(if !el_num_a.is_empty() { el_num_a[i] } else { seq });
+        seq += 1;
+    }
+    for i in 0..nb_3d {
+        labels.push(if !el_num_3d.is_empty() { el_num_3d[i] } else { seq });
+        seq += 1;
+    }
+    for i in 0..nb_sph {
+        labels.push(if !nod_num_sph.is_empty() { nod_num_sph[i] } else { seq });
+        seq += 1;
+    }
+    labels
+}
+
+/// Write an elemental scalar result as UNV Dataset 2414.
+///
+/// Like the VTK path, data for one element dimension is provided while
+/// the others are zero-padded.
+fn write_unv_elemental_scalar(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    counts: &[usize],        // [nb_1d, nb_2d, nb_3d, nb_sph]
+    active_idx: usize,
+    values: &[f32],
+    elem_labels: &[i32],
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 2, 1, 1, a_time);
+    let mut offset = 0usize;
+    let mut val_pos = 0usize;
+    for (idx, &count) in counts.iter().enumerate() {
+        for j in 0..count {
+            let label = elem_labels[offset + j];
+            let v = if idx == active_idx { values[val_pos] as f64 } else { 0.0 };
+            write!(w, "{:10}\n", label).unwrap();
+            write!(w, "{:13.5E}\n", v).unwrap();
+            if idx == active_idx { val_pos += 1; }
+        }
+        offset += count;
+    }
+    unv_delimiter(w);
+}
+
+/// Write an elemental scalar result from strided data (e.g. 1D torseur).
+fn write_unv_elemental_scalar_strided(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    counts: &[usize],
+    active_idx: usize,
+    data: &[f32],
+    stride: usize,
+    component: usize,
+    elem_labels: &[i32],
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 2, 1, 1, a_time);
+    let mut offset = 0usize;
+    let mut iel = 0usize;
+    for (idx, &count) in counts.iter().enumerate() {
+        for j in 0..count {
+            let label = elem_labels[offset + j];
+            let v = if idx == active_idx {
+                let val = data[iel * stride + component] as f64;
+                iel += 1;
+                val
+            } else {
+                0.0
+            };
+            write!(w, "{:10}\n", label).unwrap();
+            write!(w, "{:13.5E}\n", v).unwrap();
+        }
+        offset += count;
+    }
+    unv_delimiter(w);
+}
+
+/// Write an elemental symmetric tensor (6 components) as UNV Dataset 2414.
+///
+/// Components are written as: xx, yy, zz, xy, yz, xz  (UNV order).
+/// Input order from OpenRadioss 3D/SPH: xx, yy, zz, xy, xz, yz.
+fn write_unv_elemental_tensor_6(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    counts: &[usize],
+    active_idx: usize,
+    values: &[f32],       // [xx, yy, zz, xy, xz, yz] per element
+    elem_labels: &[i32],
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 2, 4, 6, a_time);
+    let mut offset = 0usize;
+    let mut val_pos = 0usize;
+    for (idx, &count) in counts.iter().enumerate() {
+        for j in 0..count {
+            let label = elem_labels[offset + j];
+            write!(w, "{:10}\n", label).unwrap();
+            if idx == active_idx {
+                let base = val_pos * 6;
+                // OpenRadioss: xx, yy, zz, xy, xz, yz
+                // UNV order:   xx, yy, zz, xy, yz, xz
+                write!(w, "{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}\n",
+                    values[base] as f64,
+                    values[base + 1] as f64,
+                    values[base + 2] as f64,
+                    values[base + 3] as f64,
+                    values[base + 5] as f64,   // yz
+                    values[base + 4] as f64,   // xz
+                ).unwrap();
+                val_pos += 1;
+            } else {
+                write!(w, "{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}\n",
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+            }
+        }
+        offset += count;
+    }
+    unv_delimiter(w);
+}
+
+/// Write an elemental symmetric tensor (3 components: xx, yy, xy)
+/// as UNV Dataset 2414 with 6-component output (zz=xz=yz=0).
+fn write_unv_elemental_tensor_3(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    counts: &[usize],
+    active_idx: usize,
+    values: &[f32],       // [xx, yy, xy] per element
+    elem_labels: &[i32],
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 2, 4, 6, a_time);
+    let mut offset = 0usize;
+    let mut val_pos = 0usize;
+    for (idx, &count) in counts.iter().enumerate() {
+        for j in 0..count {
+            let label = elem_labels[offset + j];
+            write!(w, "{:10}\n", label).unwrap();
+            if idx == active_idx {
+                let base = val_pos * 3;
+                let xx = values[base] as f64;
+                let yy = values[base + 1] as f64;
+                let xy = values[base + 2] as f64;
+                write!(w, "{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}\n",
+                    xx, yy, 0.0, xy, 0.0, 0.0).unwrap();
+                val_pos += 1;
+            } else {
+                write!(w, "{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}{:13.5E}\n",
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+            }
+        }
+        offset += count;
+    }
+    unv_delimiter(w);
+}
+
+/// Write elemental integer values as a scalar UNV Dataset 2414.
+fn write_unv_elemental_i32(
+    w: &mut impl Write,
+    dataset_label: i32,
+    name: &str,
+    values: &[i32],
+    elem_labels: &[i32],
+    a_time: f32,
+) {
+    write_unv_2414_header(w, dataset_label, name, 2, 1, 1, a_time);
+    for (i, &label) in elem_labels.iter().enumerate() {
+        write!(w, "{:10}\n", label).unwrap();
+        write!(w, "{:13.5E}\n", values[i] as f64).unwrap();
+    }
+    unv_delimiter(w);
+}
+
+// =====================================================================
 // Main conversion logic
 // =====================================================================
 
-/// Read an OpenRadioss animation file and write the corresponding VTK
-/// Legacy Unstructured Grid to `writer`.
+/// Read an OpenRadioss animation file and write the corresponding
+/// output (VTK or UNV) to `writer`.
 ///
 /// The function proceeds in two phases:
 /// 1. **Read**: Parse the entire A-file sequentially (2D geometry, 3D,
 ///    1D, hierarchy, time-history, SPH).
-/// 2. **Write**: Emit the VTK header, POINTS, CELLS, CELL_TYPES,
-///    POINT_DATA (nodal fields), and CELL_DATA (elemental fields).
+/// 2. **Write**: Emit VTK or UNV output depending on `format`.
 fn read_radioss_anim<W: Write>(
     file_name: &str,
-    binary_format: bool,
-    legacy_format: bool,
+    format: OutputFormat,
     writer: W,
 ) {
     let input_file = File::open(file_name).unwrap_or_else(|_| {
@@ -1275,8 +1805,6 @@ fn read_radioss_anim<W: Write>(
         process::exit(1);
     });
     let mut inf = BufReader::with_capacity(4 * 1024 * 1024, input_file);
-
-    let mut vtk = VtkWriter::new(writer, binary_format, legacy_format);
 
     let magic = read_i32(&mut inf);
 
@@ -1608,7 +2136,250 @@ fn read_radioss_anim<W: Write>(
                 }
             }
 
+            // ========== UNV output (if requested) ==========
+            // Detect degenerate elements (needed for both UNV and VTK)
+            // 3D: hexahedra with only 4 unique nodes are tetrahedra
+            let mut is_3d_cell_tetrahedron: Vec<bool> = Vec::with_capacity(nb_elts_3d);
+            let mut tetra_nodes: Vec<[i32; 4]> = Vec::with_capacity(nb_elts_3d);
+            let mut tetrahedron_count: usize = 0;
+            for icon in 0..nb_elts_3d {
+                let nodes = &connect_3d[icon * 8..icon * 8 + 8];
+                if let Some(tet) = unique_sorted_4_of_8(nodes) {
+                    is_3d_cell_tetrahedron.push(true);
+                    tetra_nodes.push(tet);
+                    tetrahedron_count += 1;
+                } else {
+                    is_3d_cell_tetrahedron.push(false);
+                    tetra_nodes.push([0; 4]);
+                }
+            }
+
+            // 2D: quads with only 3 unique nodes are triangles
+            let mut is_2d_triangle: Vec<bool> = Vec::with_capacity(nb_facets);
+            let mut _triangle_count: usize = 0;
+            for icon in 0..nb_facets {
+                let nodes = &connect_a[icon * 4..icon * 4 + 4];
+                if unique_count_4(nodes) == 3 {
+                    is_2d_triangle.push(true);
+                    _triangle_count += 1;
+                } else {
+                    is_2d_triangle.push(false);
+                }
+            }
+
+            if format == OutputFormat::Unv {
+                let mut out = BufWriter::with_capacity(256 * 1024, writer);
+
+                // Node label mapping: 0-based index → UNV label
+                let node_label_fn = |idx: i32| -> i32 {
+                    if !nod_num_a.is_empty() {
+                        nod_num_a[idx as usize]
+                    } else {
+                        idx + 1
+                    }
+                };
+
+                // Dataset 2411 – Nodes
+                write_unv_2411(&mut out, nb_nodes, &coor_a, &nod_num_a);
+
+                // Dataset 2412 – Elements
+                write_unv_2412(
+                    &mut out,
+                    nb_elts_1d, &connect_1d, &el_num_1d,
+                    &def_part_1d, &p_text_1d,
+                    nb_facets, &connect_a, &el_num_a,
+                    &def_part_a, &p_text_a,
+                    &is_2d_triangle,
+                    nb_elts_3d, &connect_3d, &el_num_3d,
+                    &def_part_3d, &p_text_3d,
+                    &is_3d_cell_tetrahedron, &tetra_nodes,
+                    nb_elts_sph, &connec_sph, &nod_num_sph,
+                    &def_part_sph, &p_text_sph,
+                    &node_label_fn,
+                );
+
+                // Build element labels for result output
+                let elem_labels = build_element_labels(
+                    nb_elts_1d, &el_num_1d,
+                    nb_facets, &el_num_a,
+                    nb_elts_3d, &el_num_3d,
+                    nb_elts_sph, &nod_num_sph,
+                );
+                let counts = [nb_elts_1d, nb_facets, nb_elts_3d, nb_elts_sph];
+                let mut ds_label: i32 = 1;
+
+                // --- Nodal results (Dataset 2414, location=1) ---
+
+                // Node IDs
+                if !nod_num_a.is_empty() {
+                    write_unv_nodal_i32(&mut out, ds_label, "NODE_ID",
+                        nb_nodes, &nod_num_a, &nod_num_a, a_time);
+                    ds_label += 1;
+                }
+
+                // Nodal scalar fields
+                for ifun in 0..nb_func {
+                    let name = &f_text_a_clean[ifun];
+                    let start = ifun * nb_nodes;
+                    let end = start + nb_nodes;
+                    write_unv_nodal_scalar(&mut out, ds_label, name,
+                        nb_nodes, &nod_num_a, &func_a[start..end], a_time);
+                    ds_label += 1;
+                }
+
+                // Nodal vector fields
+                for ivect in 0..nb_vect {
+                    let name = &v_text_a_clean[ivect];
+                    let start = ivect * 3 * nb_nodes;
+                    let end = start + 3 * nb_nodes;
+                    write_unv_nodal_vector(&mut out, ds_label, name,
+                        nb_nodes, &nod_num_a, &vect_val_a[start..end], a_time);
+                    ds_label += 1;
+                }
+
+                // --- Elemental results (Dataset 2414, location=2) ---
+
+                // Element IDs
+                write_unv_elemental_i32(&mut out, ds_label, "ELEMENT_ID",
+                    &elem_labels, &elem_labels, a_time);
+                ds_label += 1;
+
+                // Part IDs
+                let mut part_ids = Vec::with_capacity(elem_labels.len());
+                {
+                    let mut pi = 0usize;
+                    for iel in 0..nb_elts_1d {
+                        part_ids.push(resolve_part_id(iel, &mut pi, &def_part_1d, &p_text_1d));
+                    }
+                    pi = 0;
+                    for iel in 0..nb_facets {
+                        part_ids.push(resolve_part_id(iel, &mut pi, &def_part_a, &p_text_a));
+                    }
+                    pi = 0;
+                    for iel in 0..nb_elts_3d {
+                        part_ids.push(resolve_part_id(iel, &mut pi, &def_part_3d, &p_text_3d));
+                    }
+                    pi = 0;
+                    for iel in 0..nb_elts_sph {
+                        part_ids.push(resolve_part_id(iel, &mut pi, &def_part_sph, &p_text_sph));
+                    }
+                }
+                write_unv_elemental_i32(&mut out, ds_label, "PART_ID",
+                    &part_ids, &elem_labels, a_time);
+                ds_label += 1;
+
+                // Erosion status
+                let to_erosion = |v: u8| if v == 1 { 1i32 } else { 0 };
+                let mut erosion: Vec<i32> = Vec::with_capacity(elem_labels.len());
+                for iel in 0..nb_elts_1d { erosion.push(to_erosion(del_elt_1d[iel])); }
+                for iel in 0..nb_facets { erosion.push(to_erosion(del_elt_a[iel])); }
+                for iel in 0..nb_elts_3d { erosion.push(to_erosion(del_elt_3d[iel])); }
+                for iel in 0..nb_elts_sph { erosion.push(to_erosion(del_elt_sph[iel])); }
+                write_unv_elemental_i32(&mut out, ds_label, "EROSION_STATUS",
+                    &erosion, &elem_labels, a_time);
+                ds_label += 1;
+
+                // 1D elemental scalars
+                for iefun in 0..nb_efunc_1d {
+                    let name = &f_text_1d_clean[iefun];
+                    let start = iefun * nb_elts_1d;
+                    let end = start + nb_elts_1d;
+                    write_unv_elemental_scalar(&mut out, ds_label,
+                        &format!("1DELEM_{}", name), &counts, 0,
+                        &efunc_1d[start..end], &elem_labels, a_time);
+                    ds_label += 1;
+                }
+
+                // 1D beam torseur (F1-F3, M1-M6)
+                let tors_suffixes = ["F1", "F2", "F3", "M1", "M2", "M3", "M4", "M5", "M6"];
+                for iefun in 0..nb_tors_1d {
+                    let name = &t_text_1d_clean[iefun];
+                    let base_offset = 9 * iefun * nb_elts_1d;
+                    for j in 0..9usize {
+                        write_unv_elemental_scalar_strided(&mut out, ds_label,
+                            &format!("1DELEM_{}{}", name, tors_suffixes[j]),
+                            &counts, 0, &tors_val_1d[base_offset..],
+                            9, j, &elem_labels, a_time);
+                        ds_label += 1;
+                    }
+                }
+
+                // 2D elemental scalars
+                for iefun in 0..nb_efunc {
+                    let name = &f_text_a_clean[iefun + nb_func];
+                    let start = iefun * nb_facets;
+                    let end = start + nb_facets;
+                    write_unv_elemental_scalar(&mut out, ds_label,
+                        &format!("2DELEM_{}", name), &counts, 1,
+                        &efunc_a[start..end], &elem_labels, a_time);
+                    ds_label += 1;
+                }
+
+                // 2D symmetric tensors (xx, yy, xy)
+                for ietens in 0..nb_tens {
+                    let name = &t_text_a_clean[ietens];
+                    let start = ietens * 3 * nb_facets;
+                    let end = start + 3 * nb_facets;
+                    write_unv_elemental_tensor_3(&mut out, ds_label,
+                        &format!("2DELEM_{}", name), &counts, 1,
+                        &tens_val_a[start..end], &elem_labels, a_time);
+                    ds_label += 1;
+                }
+
+                // 3D elemental scalars
+                for iefun in 0..nb_efunc_3d {
+                    let name = &f_text_3d_clean[iefun];
+                    let start = iefun * nb_elts_3d;
+                    let end = start + nb_elts_3d;
+                    write_unv_elemental_scalar(&mut out, ds_label,
+                        &format!("3DELEM_{}", name), &counts, 2,
+                        &efunc_3d[start..end], &elem_labels, a_time);
+                    ds_label += 1;
+                }
+
+                // 3D symmetric tensors (xx, yy, zz, xy, xz, yz)
+                for ietens in 0..nb_tens_3d {
+                    let name = &t_text_3d_clean[ietens];
+                    let start = ietens * 6 * nb_elts_3d;
+                    let end = start + 6 * nb_elts_3d;
+                    write_unv_elemental_tensor_6(&mut out, ds_label,
+                        &format!("3DELEM_{}", name), &counts, 2,
+                        &tens_val_3d[start..end], &elem_labels, a_time);
+                    ds_label += 1;
+                }
+
+                // SPH elemental scalars and tensors
+                if flag_a[7] != 0 {
+                    for iefun in 0..nb_efunc_sph {
+                        let name = &scal_text_sph_clean[iefun];
+                        let start = iefun * nb_elts_sph;
+                        let end = start + nb_elts_sph;
+                        write_unv_elemental_scalar(&mut out, ds_label,
+                            &format!("SPHELEM_{}", name), &counts, 3,
+                            &efunc_sph[start..end], &elem_labels, a_time);
+                        ds_label += 1;
+                    }
+                    for ietens in 0..nb_tens_sph {
+                        let name = &tens_text_sph_clean[ietens];
+                        let start = ietens * 6 * nb_elts_sph;
+                        let end = start + 6 * nb_elts_sph;
+                        write_unv_elemental_tensor_6(&mut out, ds_label,
+                            &format!("SPHELEM_{}", name), &counts, 3,
+                            &tens_val_sph[start..end], &elem_labels, a_time);
+                        ds_label += 1;
+                    }
+                }
+
+                let _ = ds_label; // suppress unused warning
+                out.flush().unwrap();
+                return;
+            }
+
             // ========== VTK output ==========
+            let binary_format = format == OutputFormat::VtkBinary;
+            let legacy_format = format == OutputFormat::VtkLegacy;
+            let mut vtk = VtkWriter::new(writer, binary_format, legacy_format);
+
             vtk.write_header("# vtk DataFile Version 3.0");
             vtk.write_header("vtk output");
             if binary_format {
@@ -1644,36 +2415,6 @@ fn read_radioss_anim<W: Write>(
                 }
             }
             vtk.newline();
-
-            // --- Detect degenerate elements ---
-            // 3D: hexahedra with only 4 unique nodes are tetrahedra
-            let mut is_3d_cell_tetrahedron: Vec<bool> = Vec::with_capacity(nb_elts_3d);
-            let mut tetra_nodes: Vec<[i32; 4]> = Vec::with_capacity(nb_elts_3d);
-            let mut tetrahedron_count: usize = 0;
-            for icon in 0..nb_elts_3d {
-                let nodes = &connect_3d[icon * 8..icon * 8 + 8];
-                if let Some(tet) = unique_sorted_4_of_8(nodes) {
-                    is_3d_cell_tetrahedron.push(true);
-                    tetra_nodes.push(tet);
-                    tetrahedron_count += 1;
-                } else {
-                    is_3d_cell_tetrahedron.push(false);
-                    tetra_nodes.push([0; 4]);
-                }
-            }
-
-            // 2D: quads with only 3 unique nodes are triangles
-            let mut is_2d_triangle: Vec<bool> = Vec::with_capacity(nb_facets);
-            let mut _triangle_count: usize = 0;
-            for icon in 0..nb_facets {
-                let nodes = &connect_a[icon * 4..icon * 4 + 4];
-                if unique_count_4(nodes) == 3 {
-                    is_2d_triangle.push(true);
-                    _triangle_count += 1;
-                } else {
-                    is_2d_triangle.push(false);
-                }
-            }
 
             // --- CELLS (element connectivity) ---
             let total_cells = nb_elts_1d + nb_facets + nb_elts_3d + nb_elts_sph;
@@ -2095,11 +2836,13 @@ fn read_radioss_anim<W: Write>(
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <filename1> [filename2 ...] [--binary] [--threads N]", args[0]);
-        eprintln!("  --binary : Output in binary VTK format (default is ASCII)");
+        eprintln!("Usage: {} <filename1> [filename2 ...] [--binary] [--unv] [--threads N]", args[0]);
+        eprintln!("  --binary : Output in binary VTK format (default is ASCII VTK)");
         eprintln!("  --legacy : Match C++ ASCII float formatting (default uses fast shortest)");
+        eprintln!("  --unv    : Output in Universal File Format (.unv) for FEMAP / Simcenter");
+        eprintln!("             (also accepts --univ)");
         eprintln!("  --threads N : Override number of worker threads");
-        eprintln!("  Output files will have .vtk extension added automatically");
+        eprintln!("  Output files will have .vtk or .unv extension added automatically");
         eprintln!("  Input files must have no extension and end with an uppercase letter followed by 3-4 digits");
         process::exit(1);
     }
@@ -2107,6 +2850,7 @@ fn main() {
     // Check if --binary flag is present
     let binary_format = args.iter().any(|arg| arg == "--binary" || arg == "-b");
     let legacy_format = args.iter().any(|arg| arg == "--legacy" || arg == "-l");
+    let unv_format = args.iter().any(|arg| arg == "--unv" || arg == "--univ" || arg == "-u");
     let mut threads_override: Option<usize> = None;
     let mut idx = 1usize;
     while idx < args.len() {
@@ -2127,7 +2871,7 @@ fn main() {
         }
     }
     
-    // Collect all input files (skip program name and --binary flag)
+    // Collect all input files (skip program name and flags)
     let mut input_files: Vec<String> = args[1..]
         .iter()
         .filter(|arg| {
@@ -2135,6 +2879,9 @@ fn main() {
                 && *arg != "-b"
                 && *arg != "--legacy"
                 && *arg != "-l"
+                && *arg != "--unv"
+                && *arg != "--univ"
+                && *arg != "-u"
                 && *arg != "--threads"
                 && !arg.parse::<usize>().is_ok()
         })
@@ -2198,6 +2945,22 @@ fn main() {
     if binary_format && legacy_format {
         eprintln!("Warning: --legacy has no effect with --binary");
     }
+    if unv_format && (binary_format || legacy_format) {
+        eprintln!("Warning: --binary and --legacy have no effect with --unv");
+    }
+
+    // Determine output format
+    let output_format = if unv_format {
+        OutputFormat::Unv
+    } else if binary_format {
+        OutputFormat::VtkBinary
+    } else if legacy_format {
+        OutputFormat::VtkLegacy
+    } else {
+        OutputFormat::VtkAscii
+    };
+
+    let output_ext = if unv_format { ".unv" } else { ".vtk" };
 
     let mut jobs: Vec<(String, u64)> = Vec::new();
     for file_name in input_files {
@@ -2262,7 +3025,7 @@ fn main() {
                     Some(v) => v,
                     None => break,
                 };
-                let output_file_name = format!("{}.vtk", file_name);
+                let output_file_name = format!("{}{}", file_name, output_ext);
                 let output_file = match File::create(&output_file_name) {
                     Ok(f) => f,
                     Err(e) => {
@@ -2272,7 +3035,7 @@ fn main() {
                     }
                 };
                 eprintln!("Converting {} to {}", file_name, output_file_name);
-                read_radioss_anim(&file_name, binary_format, legacy_format, output_file);
+                read_radioss_anim(&file_name, output_format, output_file);
                 local_success += 1;
             }
             (local_success, local_failed)
@@ -2296,5 +3059,391 @@ fn main() {
         process::exit(1);
     } else if successful_files > 1 {
         eprintln!("\nConversion complete: {} files converted successfully", successful_files);
+    }
+}
+
+// =====================================================================
+// Unit tests
+// =====================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- Helper: format_g6 to String --------------------------------
+
+    fn g6(val: f64) -> String {
+        let mut buf = [0u8; 32];
+        let len = format_g6(&mut buf, val);
+        std::str::from_utf8(&buf[..len]).unwrap().to_string()
+    }
+
+    // ----- write_u32_fast ---------------------------------------------
+
+    #[test]
+    fn test_write_u32_fast_zero() {
+        let mut buf = [0u8; 10];
+        let len = write_u32_fast(&mut buf, 0);
+        assert_eq!(&buf[..len], b"0");
+    }
+
+    #[test]
+    fn test_write_u32_fast_single_digit() {
+        let mut buf = [0u8; 10];
+        let len = write_u32_fast(&mut buf, 7);
+        assert_eq!(&buf[..len], b"7");
+    }
+
+    #[test]
+    fn test_write_u32_fast_two_digits() {
+        let mut buf = [0u8; 10];
+        let len = write_u32_fast(&mut buf, 42);
+        assert_eq!(&buf[..len], b"42");
+    }
+
+    #[test]
+    fn test_write_u32_fast_boundary_99() {
+        let mut buf = [0u8; 10];
+        let len = write_u32_fast(&mut buf, 99);
+        assert_eq!(&buf[..len], b"99");
+    }
+
+    #[test]
+    fn test_write_u32_fast_boundary_100() {
+        let mut buf = [0u8; 10];
+        let len = write_u32_fast(&mut buf, 100);
+        assert_eq!(&buf[..len], b"100");
+    }
+
+    #[test]
+    fn test_write_u32_fast_large() {
+        let mut buf = [0u8; 10];
+        let len = write_u32_fast(&mut buf, 1234567890);
+        assert_eq!(&buf[..len], b"1234567890");
+    }
+
+    #[test]
+    fn test_write_u32_fast_max() {
+        let mut buf = [0u8; 10];
+        let len = write_u32_fast(&mut buf, u32::MAX);
+        assert_eq!(&buf[..len], b"4294967295");
+    }
+
+    // ----- write_i32_fast ---------------------------------------------
+
+    #[test]
+    fn test_write_i32_fast_positive() {
+        let mut buf = [0u8; 11];
+        let len = write_i32_fast(&mut buf, 42);
+        assert_eq!(&buf[..len], b"42");
+    }
+
+    #[test]
+    fn test_write_i32_fast_zero() {
+        let mut buf = [0u8; 11];
+        let len = write_i32_fast(&mut buf, 0);
+        assert_eq!(&buf[..len], b"0");
+    }
+
+    #[test]
+    fn test_write_i32_fast_negative() {
+        let mut buf = [0u8; 11];
+        let len = write_i32_fast(&mut buf, -123);
+        assert_eq!(&buf[..len], b"-123");
+    }
+
+    #[test]
+    fn test_write_i32_fast_min() {
+        let mut buf = [0u8; 11];
+        let len = write_i32_fast(&mut buf, i32::MIN);
+        assert_eq!(&buf[..len], b"-2147483648");
+    }
+
+    // ----- write_u64_fast ---------------------------------------------
+
+    #[test]
+    fn test_write_u64_fast_zero() {
+        let mut buf = [0u8; 20];
+        let len = write_u64_fast(&mut buf, 0);
+        assert_eq!(&buf[..len], b"0");
+    }
+
+    #[test]
+    fn test_write_u64_fast_small() {
+        let mut buf = [0u8; 20];
+        let len = write_u64_fast(&mut buf, 999);
+        assert_eq!(&buf[..len], b"999");
+    }
+
+    #[test]
+    fn test_write_u64_fast_above_u32() {
+        let mut buf = [0u8; 20];
+        let len = write_u64_fast(&mut buf, 5_000_000_000);
+        assert_eq!(&buf[..len], b"5000000000");
+    }
+
+    #[test]
+    fn test_write_u64_fast_max() {
+        let mut buf = [0u8; 20];
+        let len = write_u64_fast(&mut buf, u64::MAX);
+        assert_eq!(&buf[..len], b"18446744073709551615");
+    }
+
+    // ----- fast_log10_floor -------------------------------------------
+
+    #[test]
+    fn test_log10_floor_powers_of_10() {
+        for e in 0..15 {
+            let v = 10.0_f64.powi(e);
+            assert_eq!(fast_log10_floor(v), e, "10^{e}");
+        }
+    }
+
+    #[test]
+    fn test_log10_floor_just_below() {
+        // 9.999... is just below 10 → floor(log10) = 0
+        assert_eq!(fast_log10_floor(9.999), 0);
+        assert_eq!(fast_log10_floor(99.99), 1);
+        assert_eq!(fast_log10_floor(0.999), -1);
+    }
+
+    #[test]
+    fn test_log10_floor_just_above() {
+        assert_eq!(fast_log10_floor(10.001), 1);
+        assert_eq!(fast_log10_floor(1.001), 0);
+        assert_eq!(fast_log10_floor(0.1001), -1);
+    }
+
+    #[test]
+    fn test_log10_floor_small_values() {
+        assert_eq!(fast_log10_floor(0.001), -3);
+        assert_eq!(fast_log10_floor(0.0001), -4);
+        assert_eq!(fast_log10_floor(1e-10), -10);
+    }
+
+    // ----- strip_trailing_zeros ---------------------------------------
+
+    #[test]
+    fn test_strip_trailing_zeros_no_zeros() {
+        assert_eq!(strip_trailing_zeros(123, 3), (123, 3));
+    }
+
+    #[test]
+    fn test_strip_trailing_zeros_some() {
+        assert_eq!(strip_trailing_zeros(12300, 5), (123, 3));
+    }
+
+    #[test]
+    fn test_strip_trailing_zeros_all() {
+        assert_eq!(strip_trailing_zeros(10000, 5), (1, 1));
+    }
+
+    #[test]
+    fn test_strip_trailing_zeros_single_zero() {
+        assert_eq!(strip_trailing_zeros(120, 3), (12, 2));
+    }
+
+    #[test]
+    fn test_strip_trailing_zeros_zero_value() {
+        // All zeros → strips everything
+        assert_eq!(strip_trailing_zeros(0, 3), (0, 0));
+    }
+
+    // ----- round_half_to_even ----------------------------------------
+
+    #[test]
+    fn test_round_half_to_even_basic() {
+        assert_eq!(round_half_to_even(2.3), 2);
+        assert_eq!(round_half_to_even(2.7), 3);
+    }
+
+    #[test]
+    fn test_round_half_to_even_half_down() {
+        // 2.5 → round to even → 2
+        assert_eq!(round_half_to_even(2.5), 2);
+        // 4.5 → round to even → 4
+        assert_eq!(round_half_to_even(4.5), 4);
+    }
+
+    #[test]
+    fn test_round_half_to_even_half_up() {
+        // 3.5 → round to even → 4
+        assert_eq!(round_half_to_even(3.5), 4);
+        // 5.5 → round to even → 6
+        assert_eq!(round_half_to_even(5.5), 6);
+    }
+
+    #[test]
+    fn test_round_half_to_even_zero() {
+        assert_eq!(round_half_to_even(0.5), 0);
+        assert_eq!(round_half_to_even(1.5), 2);
+    }
+
+    // ----- format_g6 -------------------------------------------------
+
+    #[test]
+    fn test_g6_zero() {
+        assert_eq!(g6(0.0), "0");
+    }
+
+    #[test]
+    fn test_g6_negative_zero() {
+        assert_eq!(g6(-0.0), "-0");
+    }
+
+    #[test]
+    fn test_g6_nan() {
+        assert_eq!(g6(f64::NAN), "nan");
+    }
+
+    #[test]
+    fn test_g6_inf() {
+        assert_eq!(g6(f64::INFINITY), "inf");
+        assert_eq!(g6(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn test_g6_integers() {
+        assert_eq!(g6(1.0), "1");
+        assert_eq!(g6(5.0), "5");
+        assert_eq!(g6(-3.0), "-3");
+        assert_eq!(g6(100.0), "100");
+        assert_eq!(g6(123456.0), "123456");
+    }
+
+    #[test]
+    fn test_g6_small_fixed() {
+        assert_eq!(g6(0.001234), "0.001234");
+        assert_eq!(g6(0.0001), "0.0001");
+    }
+
+    #[test]
+    fn test_g6_exponential() {
+        assert_eq!(g6(1e6), "1e+06");
+        assert_eq!(g6(1.23e10), "1.23e+10");
+        assert_eq!(g6(1e-5), "1e-05");
+        assert_eq!(g6(1.5e-5), "1.5e-05");
+    }
+
+    #[test]
+    fn test_g6_trailing_zeros_stripped() {
+        assert_eq!(g6(1.50), "1.5");
+        assert_eq!(g6(1.10), "1.1");
+        assert_eq!(g6(100.0), "100");
+    }
+
+    #[test]
+    fn test_g6_six_significant_digits() {
+        assert_eq!(g6(3.14159), "3.14159");
+        assert_eq!(g6(123456.0), "123456");
+        assert_eq!(g6(1234567.0), "1.23457e+06");
+    }
+
+    #[test]
+    fn test_g6_negative() {
+        assert_eq!(g6(-1.5), "-1.5");
+        assert_eq!(g6(-0.001234), "-0.001234");
+        assert_eq!(g6(-1.23e10), "-1.23e+10");
+    }
+
+    #[test]
+    fn test_g6_boundary_fixed_vs_exp() {
+        // exp10 = -4 → fixed:  0.0001234
+        assert_eq!(g6(0.0001234), "0.0001234");
+        // exp10 = -5 → exponential
+        assert_eq!(g6(0.00001234), "1.234e-05");
+        // exp10 = 5  → fixed:  999999
+        assert_eq!(g6(999999.0), "999999");
+        // exp10 = 6  → exponential
+        assert_eq!(g6(1000000.0), "1e+06");
+    }
+
+    // ----- unique_count_4 --------------------------------------------
+
+    #[test]
+    fn test_unique_count_4_all_different() {
+        assert_eq!(unique_count_4(&[1, 2, 3, 4]), 4);
+    }
+
+    #[test]
+    fn test_unique_count_4_triangle() {
+        // Degenerate quad: node repeated → triangle
+        assert_eq!(unique_count_4(&[1, 2, 3, 3]), 3);
+        assert_eq!(unique_count_4(&[1, 2, 3, 1]), 3);
+    }
+
+    #[test]
+    fn test_unique_count_4_all_same() {
+        assert_eq!(unique_count_4(&[5, 5, 5, 5]), 1);
+    }
+
+    #[test]
+    fn test_unique_count_4_two_pairs() {
+        assert_eq!(unique_count_4(&[1, 2, 1, 2]), 2);
+    }
+
+    // ----- unique_sorted_4_of_8 --------------------------------------
+
+    #[test]
+    fn test_unique_sorted_4_of_8_hex() {
+        // True hexahedron: 8 distinct nodes → None
+        assert_eq!(unique_sorted_4_of_8(&[1, 2, 3, 4, 5, 6, 7, 8]), None);
+    }
+
+    #[test]
+    fn test_unique_sorted_4_of_8_tet() {
+        // Degenerate tet: only 4 distinct nodes
+        assert_eq!(
+            unique_sorted_4_of_8(&[1, 2, 3, 3, 4, 4, 1, 2]),
+            Some([1, 2, 3, 4])
+        );
+    }
+
+    #[test]
+    fn test_unique_sorted_4_of_8_five_unique() {
+        // 5 distinct nodes → None (not a tet)
+        assert_eq!(unique_sorted_4_of_8(&[1, 2, 3, 4, 5, 1, 2, 3]), None);
+    }
+
+    // ----- atoi_prefix -----------------------------------------------
+
+    #[test]
+    fn test_atoi_prefix_simple() {
+        assert_eq!(atoi_prefix("42"), 42);
+    }
+
+    #[test]
+    fn test_atoi_prefix_with_trailing() {
+        assert_eq!(atoi_prefix("123abc"), 123);
+    }
+
+    #[test]
+    fn test_atoi_prefix_negative() {
+        assert_eq!(atoi_prefix("-7"), -7);
+    }
+
+    #[test]
+    fn test_atoi_prefix_leading_whitespace() {
+        assert_eq!(atoi_prefix("  99"), 99);
+    }
+
+    #[test]
+    fn test_atoi_prefix_plus_sign() {
+        assert_eq!(atoi_prefix("+5"), 5);
+    }
+
+    #[test]
+    fn test_atoi_prefix_no_digits() {
+        assert_eq!(atoi_prefix("abc"), 0);
+        assert_eq!(atoi_prefix(""), 0);
+    }
+
+    // ----- replace_underscore ----------------------------------------
+
+    #[test]
+    fn test_replace_underscore() {
+        assert_eq!(replace_underscore("hello world"), "hello_world");
+        assert_eq!(replace_underscore("no_spaces"), "no_spaces");
+        assert_eq!(replace_underscore("a b c"), "a_b_c");
     }
 }
