@@ -27,6 +27,8 @@ OpenRadioss GUI is a graphical launcher for OpenRadioss
 
 ## Output converter
 
+* anim_to_vtk : converts OpenRadioss animation files to VTK format (ASCII or binary) or UNV format.
+* compare_vtk : compares two VTK files and reports the maximum absolute difference between them.
 * anim_to_csv : converts OpenRadioss animation files to csv format.
 * th_to_nms   : converts OpenRadioss time history files to nms format.
 

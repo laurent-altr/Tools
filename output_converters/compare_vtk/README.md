@@ -90,12 +90,12 @@ Number of cell scalars (int): 2 vs 2
 Number of cell scalars (float): 1 vs 1
 Points (coordinates): max abs diff = 1.234567e-7 (at index 42)
 Point scalar 'NODE_ID': max abs diff = 0.000000e0 (at index 0)
-Point scalar 'PRESSURE': max abs diff = 2.345678e-6 (at index 123)
+Point scalar 'PRESSURE': max abs diff = 2.345678e-7 (at index 123)
 Point vector 'VELOCITY': max abs diff = 3.456789e-7 (at index 89)
-Cell scalar (float) 'STRESS': max abs diff = 1.234567e-6 (at index 234)
+Cell scalar (float) 'STRESS': max abs diff = 4.567890e-7 (at index 234)
 
 === Summary ===
-Maximum absolute difference: 2.345678e-6
+Maximum absolute difference: 4.567890e-7
 Files are essentially identical (difference < 1e-6)
 
 Comparison completed successfully.
