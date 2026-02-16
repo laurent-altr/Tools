@@ -1,0 +1,12 @@
+[package]
+name = "compare_vtk"
+version = "0.1.0"
+edition = "2021"
+description = "Compare two VTK files and report maximum absolute difference"
+license = "MIT"
+
+[[bin]]
+name = "compare_vtk"
+path = "src/main.rs"
+
+[dependencies]
