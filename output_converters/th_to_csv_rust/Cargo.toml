@@ -1,0 +1,6 @@
+[package]
+name = "th_to_csv"
+version = "0.1.0"
+edition = "2021"
+description = "Convert OpenRadioss time history files to CSV format"
+license = "MIT"
