@@ -1284,9 +1284,11 @@ void csvFileWrite(char* csvFilename,char* titleFilename,int *nbglobVar,int *nbPa
         {
             fprintf(csvFile,"\"%s ",ThGroupNames[cpt]);
             fread(buffer, 10, 1, titlesFile);
+            buffer[10] = '\0';
             outpuType = atoi(buffer);
             fread(buffer, 1, 1, titlesFile);
             fread(buffer, 10, 1, titlesFile);
+            buffer[10] = '\0';
             fprintf(csvFile," %s \"",buffer);
             if(i < nbData-1) fprintf(csvFile,",");
             cpt++;
