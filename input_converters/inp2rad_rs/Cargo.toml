@@ -1,0 +1,13 @@
+[package]
+name = "inp2rad"
+version = "0.1.0"
+edition = "2021"
+description = "Abaqus .inp to OpenRadioss .rad converter (Rust)"
+license = "MIT"
+
+[[bin]]
+name = "inp2rad"
+path = "src/main.rs"
+
+[dependencies]
+# zero external dependencies
