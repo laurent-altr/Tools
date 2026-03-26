@@ -4934,6 +4934,181 @@ def convert_dloads(input_lines, nset_counter, nsets, property_names, functs_dict
 
 
 ####################################################################################################
+# Function to convert *PLOAD4 and *DLOAD pressure loads to Radioss /PLOAD/ cards                   #
+####################################################################################################
+def convert_pload(input_lines, nset_counter, surf_id, surf_name_to_id, elset_dicts,
+                  segment_dictionary, functs_dict, fct_id):
+    """Convert *PLOAD4 and pressure-type *DLOAD entries to Radioss /PLOAD/ blocks."""
+
+    pload_blocks = []
+    pload_counter = 0
+    section = None
+    amplitude_name = None
+
+    # Pressure load types in *DLOAD that map to /PLOAD/ (not GRAV which is handled separately)
+    pressure_load_types = {'P', 'PRESS', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6',
+                           'PNU', 'PNUBOT', 'PNUMID', 'PNUTOP'}
+
+    # Map Abaqus solid/shell face IDs to segment_dictionary keys
+    face_side_map = {
+        'P1': 's1', 'P2': 's2', 'P3': 's3',
+        'P4': 's4', 'P5': 's5', 'P6': 's6',
+        'P': None,    # all available faces (shell: spos/sneg, solid: s1-s6)
+        'PRESS': None,
+    }
+
+    for line in input_lines:
+        line_stripped = line.strip()
+
+        if line_stripped.lower().startswith("*pload4"):
+            section = "*pload4"
+            amplitude_name = None
+            amp_match = re.search(r'amplitude\s*=\s*([^\s,]+)', line_stripped, re.IGNORECASE)
+            if amp_match:
+                amplitude_name = amp_match.group(1).strip()
+            continue
+
+        if line_stripped.lower().startswith("*dload"):
+            section = "*dload_pressure"
+            amplitude_name = None
+            amp_match = re.search(r'amplitude\s*=\s*([^\s,]+)', line_stripped, re.IGNORECASE)
+            if amp_match:
+                amplitude_name = amp_match.group(1).strip()
+            continue
+
+        if line_stripped.startswith("*"):
+            section = None
+            continue
+
+        # --- *PLOAD4 processing ---
+        if section == "*pload4" and line_stripped:
+            fields = [f.strip() for f in line_stripped.split(',')]
+            if len(fields) < 2:
+                continue
+            surf_name = fields[0]
+            try:
+                pressure = float(fields[1])
+            except ValueError:
+                continue
+
+            ref_surf_id = surf_name_to_id.get(surf_name)
+            if ref_surf_id is None:
+                print(f"### WARNING ###: Surface '{surf_name}' in *PLOAD4 not found. Skipping.")
+                continue
+
+            if amplitude_name and amplitude_name in functs_dict:
+                funct_id_val = functs_dict[amplitude_name].get('id')
+                need_constant_fct = False
+            else:
+                fct_id += 1
+                funct_id_val = fct_id
+                need_constant_fct = True
+
+            nset_counter += 1
+            pload_counter = nset_counter
+
+            pload_block  = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|\n"
+            pload_block += f"/PLOAD/{pload_counter}\n"
+            pload_block += f"Pressure Load {surf_name}\n"
+            pload_block += "#funct_IDp   sens_ID  surf_ID  Isensor                              Ascale_x             Fscale_y\n"
+            pload_block += f"{funct_id_val:>10}         0{ref_surf_id:>10}         0                                       1{pressure:>20.10g}"
+
+            if need_constant_fct:
+                pload_block += f"\n#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|\n"
+                pload_block += f"/FUNCT/{funct_id_val}\n"
+                pload_block += f"Pressure Constant {surf_name}\n"
+                pload_block += "#                  X                   Y\n"
+                pload_block += "                   0                   1\n"
+                pload_block += "                 1.0                   1"
+
+            pload_blocks.append(pload_block)
+
+        # --- *DLOAD pressure-type processing ---
+        elif section == "*dload_pressure" and line_stripped:
+            fields = [f.strip() for f in line_stripped.split(',')]
+            if len(fields) < 3:
+                continue
+
+            elset_name = fields[0]
+            load_type = fields[1].upper()
+
+            if load_type not in pressure_load_types:
+                continue  # GRAV and others are handled by convert_dloads
+
+            try:
+                pressure = float(fields[2])
+            except ValueError:
+                continue
+
+            surface_side = face_side_map.get(load_type)  # None means all faces
+
+            elements = elset_dicts.get(elset_name, [])
+            if not elements:
+                print(f"### WARNING ###: Element set '{elset_name}' in *DLOAD pressure not found. Skipping.")
+                continue
+
+            # Build surface segments for the specified face(s)
+            surf_segs = []
+            all_sides = ['s1', 's2', 's3', 's4', 's5', 's6', 'spos', 'sneg']
+            for elem in elements:
+                try:
+                    elem_int = int(elem)
+                except (ValueError, TypeError):
+                    continue
+                if elem_int not in segment_dictionary:
+                    continue
+                sides_to_try = [surface_side] if surface_side else all_sides
+                for side in sides_to_try:
+                    nodes = segment_dictionary[elem_int].get(side, [])
+                    if nodes:
+                        segment_nodes = ''.join([f"{node:>10}" for node in nodes])
+                        surf_segs.append(f"          {segment_nodes}")
+
+            if not surf_segs:
+                print(f"### WARNING ###: No surface segments for *DLOAD pressure on '{elset_name}'. Skipping.")
+                continue
+
+            surf_id += 1
+            new_surf_id = surf_id
+            surf_name_key = f"{elset_name}_{load_type}_pload"
+            surf_name_to_id[surf_name_key] = new_surf_id
+
+            if amplitude_name and amplitude_name in functs_dict:
+                funct_id_val = functs_dict[amplitude_name].get('id')
+                need_constant_fct = False
+            else:
+                fct_id += 1
+                funct_id_val = fct_id
+                need_constant_fct = True
+
+            nset_counter += 1
+            pload_counter = nset_counter
+
+            pload_block  = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|\n"
+            pload_block += f"#SURF SEGS for DLOAD pressure surface {elset_name} face {load_type}\n"
+            pload_block += "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|\n"
+            pload_block += f"/SURF/SEG/{new_surf_id}\n{elset_name}_{load_type}\n"
+            pload_block += "\n".join(surf_segs)
+            pload_block += f"\n#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|\n"
+            pload_block += f"/PLOAD/{pload_counter}\n"
+            pload_block += f"Pressure Load {elset_name} {load_type}\n"
+            pload_block += "#funct_IDp   sens_ID  surf_ID  Isensor                              Ascale_x             Fscale_y\n"
+            pload_block += f"{funct_id_val:>10}         0{new_surf_id:>10}         0                                       1{pressure:>20.10g}"
+
+            if need_constant_fct:
+                pload_block += f"\n#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|\n"
+                pload_block += f"/FUNCT/{funct_id_val}\n"
+                pload_block += f"Pressure Constant {elset_name}\n"
+                pload_block += "#                  X                   Y\n"
+                pload_block += "                   0                   1\n"
+                pload_block += "                 1.0                   1"
+
+            pload_blocks.append(pload_block)
+
+    return pload_blocks, nset_counter, surf_id, fct_id
+
+
+####################################################################################################
 # Function to create /RBODY from Rigid parts or Nset                                               #
 # coupkin, kincoup, conversion handled elsewhwere (in convert_coupling def)                        #
 ####################################################################################################
@@ -5914,6 +6089,13 @@ def main_conversion_sp(input_lines, simple_file_name, elsets_for_expansion_dict,
         elapsed_time = time.time() - start_time
         print(f"Gravity Done:            {elapsed_time:8.3f} seconds")
 
+    pload_blocks, nset_counter, surf_id, fct_id = convert_pload(input_lines, nset_counter,
+        surf_id, surf_name_to_id, elset_dicts, segment_dictionary, functs_dict, fct_id
+        )
+    if run_timer:
+        elapsed_time = time.time() - start_time
+        print(f"Pressure Loads Done:     {elapsed_time:8.3f} seconds")
+
     mpc_ties, mpc_rigids, prop_id, max_elem_id = convert_mpc_ties(input_lines, prop_id,
         max_elem_id
         )
@@ -5952,7 +6134,7 @@ def main_conversion_sp(input_lines, simple_file_name, elsets_for_expansion_dict,
             transform_lines, transform_data, node_lines, nsets, nset_blocks, material_names,
             extra_material_names, property_names, element_lines, elset_blocks,
             surface_lines, contacts, tied_contacts, boundary_blocks, function_blocks,
-            initial_blocks, dload_blocks, rigid_bodies, couplings, discoups, mpc_ties,
+            initial_blocks, dload_blocks, pload_blocks, rigid_bodies, couplings, discoups, mpc_ties,
             conn_beams, engine_file
            )
 
@@ -5963,7 +6145,7 @@ def main_conversion_sp(input_lines, simple_file_name, elsets_for_expansion_dict,
 def write_output(transform_lines, transform_data, node_lines, nset_blocks, material_names,
  extra_material_names, property_names, non_numeric_references, nsets, element_lines,
  elset_blocks, surface_lines, contacts, tied_contacts, boundary_blocks, function_blocks,
- initial_blocks, dload_blocks, rigid_bodies, couplings, discoups, mpc_ties, conn_beams,
+ initial_blocks, dload_blocks, pload_blocks, rigid_bodies, couplings, discoups, mpc_ties, conn_beams,
  engine_file, simple_file_name, output_file_name, output_file_path, engine_file_name,
  engine_file_path
  ):
@@ -6340,6 +6522,9 @@ def write_output(transform_lines, transform_data, node_lines, nset_blocks, mater
 
         for dload_block in dload_blocks:
             output_file.write(dload_block + '\n')
+
+        for pload_block in pload_blocks:
+            output_file.write(pload_block + '\n')
 
         if run_timer:
             elapsed_time = time.time() - start_time
@@ -7439,7 +7624,7 @@ def start(input_file_path):
         (transform_lines, transform_data, node_lines, nsets, nset_blocks, material_names,
          extra_material_names, property_names, element_lines, elset_blocks,
          surface_lines, contacts, tied_contacts, boundary_blocks, function_blocks, initial_blocks,
-         dload_blocks, rigid_bodies, couplings, discoups, mpc_ties, conn_beams, engine_file
+         dload_blocks, pload_blocks, rigid_bodies, couplings, discoups, mpc_ties, conn_beams, engine_file
          ) = main_conversion_sp(input_lines, simple_file_name, elsets_for_expansion_dict,
          non_numeric_references, relsets_for_expansion_dict, nset_references
          )
@@ -7451,8 +7636,8 @@ def start(input_file_path):
                                    material_names, extra_material_names, property_names,
                                    non_numeric_references, nsets, element_lines, elset_blocks,
                                    surface_lines, contacts, tied_contacts, boundary_blocks,
-                                   function_blocks, initial_blocks, dload_blocks, rigid_bodies,
-                                   couplings, discoups, mpc_ties, conn_beams, engine_file,
+                                   function_blocks, initial_blocks, dload_blocks, pload_blocks,
+                                   rigid_bodies, couplings, discoups, mpc_ties, conn_beams, engine_file,
                                    simple_file_name, output_file_name, output_file_path,
                                    engine_file_name, engine_file_path
                                    )
